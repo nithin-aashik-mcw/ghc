@@ -62,14 +62,15 @@ import Control.Monad.Trans.State.Strict
 -- files.
 getCoveredCodes :: IO (Set DiagnosticCode)
 getCoveredCodes =
-  do { top <- dropWhileEnd isSpace
-          <$> readProcess "git" ["rev-parse", "--show-toplevel"] ""
+  do { cdup <- dropWhileEnd isSpace
+          <$> readProcess "git" ["rev-parse", "--show-cdup"] ""
        -- TODO: would be better to avoid using git entirely.
 
-       -- When run inside an MSYS shell, git may return a Unix-style path
-       -- like /c/Blah. System.Directory doesn't like that, so we make sure
-       -- to turn that into C:/Blah. See #25178.
-     ; top' <- fixupMsysDrive top
+       -- Ask for the top of the tree relative to the current directory
+       -- (empty when we're already there). MSYS git spells absolute paths
+       -- MSYS-style, e.g. /c/Blah (#25178) or /home/user/ghc for a checkout
+       -- inside the MSYS root, and System.Directory understands neither.
+     ; top' <- fixupMsysDrive (if null cdup then "." else cdup)
      ; let testRoot = top' </> "testsuite" </> "tests"
      ; traverseFilesFrom includeFile diagnosticCodesIn testRoot
      }

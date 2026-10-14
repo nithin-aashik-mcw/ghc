@@ -164,9 +164,29 @@ pprDatas config (CmmStaticsRaw alias [CmmStaticLit (CmmLabel lbl), CmmStaticLit 
       platform = ncgPlatform config
 
 pprDatas config (CmmStaticsRaw lbl dats)
-  = vcat (pprLabel platform lbl : map (pprData platform) dats)
+  = vcat (pprDataAlign platform dats : pprLabel platform lbl : map (pprData platform) dats)
     where
       platform = ncgPlatform config
+
+-- | Align a data label for the most strictly aligned item it labels.
+--
+-- pprDataItem aligns float and vector literals itself, but that .p2align
+-- comes after the label: if the label isn't already aligned, the padding ends
+-- up between the label and the data, and the label points at the padding.
+-- Sections are only 8-byte aligned (pprAlignForSection), so this broke
+-- 16-byte vector literals, e.g. on Windows where they follow code in .text.
+pprDataAlign :: IsDoc doc => Platform -> [CmmStatic] -> doc
+pprDataAlign platform dats = case foldr (max . align) 0 dats of
+    0 -> empty
+    n -> line (text "\t.p2align" <+> int n)
+  where
+    align :: CmmStatic -> Int
+    align (CmmStaticLit lit) = case cmmTypeFormat (cmmLitType platform lit) of
+      FF32          -> 2
+      FF64          -> 3
+      VecFormat {}  -> 4
+      _             -> 0
+    align _ = 0
 
 pprData :: IsDoc doc => Platform -> CmmStatic -> doc
 pprData _platform (CmmString str) = line (pprString str)

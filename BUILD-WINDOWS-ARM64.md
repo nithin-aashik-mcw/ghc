@@ -62,7 +62,10 @@ on Windows hits the bugs below. The fixes are in this working tree:
 | `configure.ac`, `m4/prep_target_file.m4`, `hadrian/cfg/default.host.target.in` | The host target had no windres, so the stage1 compiler failed to link any executable: `builderMainLoop: invalid argument`. An empty merge-objects command became `"."`. | windres comes from the bootstrap GHC's `--info`. Merge-objects is `Nothing` when empty. |
 | `utils/hsc2hs/src/ATTParser.hs` (submodule) | clang ≥ 21 emits CodeView `.debug$S` records on COFF, and hsc2hs `--via-asm` attached them to the last constant: `Cannot combine instructions: [Quad 8,Long 4,Long 241,…]`. No clang flag disables these records. | The parser drops `.debug*` sections. |
 | `utils/ghc-pkg/Main.hs` | `ghc-pkg describe --expand-pkgroot` didn't expand `${pkgroot}` in `library-dirs-static`. Hadrian copies the bootstrap compiler's packages this way, so static links searched the wrong directory: `lld: error: unable to find library -lHSbase-…`. Only matters when bootstrapping (section 6). | `mungePackagePaths` now expands `libraryDirsStatic` too, like GHC's own `mungeUnitInfoPaths`. |
-| `rts/linker/PEi386.c`, `rts/linker/PEi386Types.h` | GHCi's object loader had only placeholder ARM64 support, so `ghc -e`, `ghci` and Template Haskell failed with `PE/PE+ not supported on ARM64.` | Implements the ARM64 COFF relocations, jump islands for far targets (see `Note [ARM64 jump islands]`), `.pdata` registration and instruction-cache flushing. Also treats `IMAGE_SYM_CLASS_LABEL` symbols (LLVM's `$L.text_N`) as local. |
+| `rts/linker/PEi386.c`, `rts/linker/PEi386Types.h` | GHCi's object loader had only placeholder ARM64 support, so `ghc -e`, `ghci` and Template Haskell failed with `PE/PE+ not supported on ARM64.` | Implements the ARM64 COFF relocations, jump islands for far targets (see `Note [ARM64 jump islands]`), `.pdata` registration and instruction-cache flushing. Also treats `IMAGE_SYM_CLASS_LABEL` symbols (LLVM's `$L.text_N`) as local, and handles the `SECREL*` relocations that `libc++abi` uses for thread-local variables. |
+| `compiler/GHC/CmmToAsm/AArch64/Ppr.hs` | The ARM64 code generator printed a literal's `.p2align` *after* its label. For 16-byte SIMD constants that follow code in `.text`, the label could end up pointing at `nop` padding, so the low half of the vector was garbage (e.g. `-3097596797610942433` = two `nop`s). | Aligns the label for the most strictly aligned item it labels. |
+| `linters/lint-codes/LintCodes/Coverage.hs` | The `codes` test failed with `C:\home\…\testsuite\tests: … does not exist`. MSYS git returns `/home/user/ghc` for a checkout inside the MSYS root, which Windows programs can't resolve. | Gets the tree root with `git rev-parse --show-cdup` (a relative path) instead. |
+| Tests: `ghci/should_run/T25636f`, `ghc-heap/tests/create_tso.c`, `rts/T7289` | Two tests assumed tables-next-to-code, and `T7289` reads the x87 FPU control word. | Pass the right info-table layout; skip `T7289` on non-x86. |
 | `hadrian/src/Settings/Builders/RunTest.hs` | `ifMinGhcVer` compared versions as strings, so with a 10.x bootstrap compiler (`"1001"` < `"801"`) the testsuite ran without `-fno-diagnostics-show-caret` and three other flags. About 3,400 tests failed with `stderr mismatch`. | Compares the versions as numbers. |
 | `testsuite/tests/codeGen/should_run/all.T` | `CallConv`'s assembly only works with tables-next-to-code, which Windows ARM64 doesn't use. It crashed with *"Access violation … when executing data"*. | Skip the test without tables-next-to-code. |
 
@@ -211,9 +214,11 @@ builds GHC again **natively**, using `C:\ghc-arm64` as the bootstrap compiler.
 The result includes GHCi and Template Haskell. These need the RTS linker fix
 from section 2.
 
-> **Status:** the native build completes. `ghc -e`, Template Haskell
-> splices, and a sample of GHCi, Template Haskell and annotation tests pass
-> (see 6.5). The full testsuite hasn't been rerun since the fixes in section 2.
+> **Status:** the native build completes and GHCi and Template Haskell work.
+> A full testsuite run gave 11,865 expected passes and 26 unexpected
+> failures. After the fixes in section 2, those 26 come down to `T9329`
+> (section 7) and 10 profiling tests that need the `late_ccs` flavour
+> (see 6.4). The full testsuite hasn't been rerun since then.
 
 The bootstrap compiler is a development snapshot (`10.1.x`), not a release.
 Hackage packages and Hadrian don't fully support it yet, which is why
@@ -301,9 +306,16 @@ fresh directory instead, which also keeps the cross build intact:
 
 ```bash
 mkdir -p _build-native/mingw
-hadrian/build -j --build-root=_build-native --flavour=default+native_bignum --docs=none \
+hadrian/build -j --build-root=_build-native --flavour=default+native_bignum+late_ccs --docs=none \
   2>&1 | tee build-native.log
 ```
+
+`late_ccs` builds the profiled libraries with `-fprof-late`, as upstream's
+`perf` flavour does. Without it, profiles and profiling call stacks contain no
+cost centres from `base` (e.g. `GHC.Internal.TopHandler.runMainIO`), and about
+10 profiling tests fail with `bad profile` or `bad stdout`. Adding it to an
+existing build rebuilds only the profiled libraries. This fix is inferred from
+how Hadrian's flavours differ and hasn't been tested yet.
 
 The empty `mingw` directory serves the same purpose as the one in section 5.
 GHC on Windows refuses to start unless a `mingw` directory exists up to three
@@ -335,7 +347,7 @@ To run the testsuite, use the same Hadrian flags and add `test`. Use
 `--only="name1 name2"` to run individual tests:
 
 ```bash
-hadrian/build -j --build-root=_build-native --flavour=default+native_bignum --docs=none test
+hadrian/build -j --build-root=_build-native --flavour=default+native_bignum+late_ccs --docs=none test
 ```
 
 Run it from a terminal (the MSYS2 CLANGARM64 window). The testsuite driver
@@ -349,12 +361,22 @@ stops with *"Can't detect Windows terminal type"* when it has no console.
   cross-compiler has no internal interpreter, so `ghc -e` and `ghci` report
   *"not built for interactive use"*. `ghc-iserv` isn't part of the cross
   build's stage2 package set. Use the native build from section 6 instead.
-- **The ARM64 RTS linker support is new** (section 2) and only partly tested.
-  The section-relative relocations (`SECREL*`, `SECTION`) aren't implemented.
-  None of the installed libraries use them. A far reference to *data* in a
-  DLL (more than about 3GB from `ghc.exe`) is reported as an error rather
-  than redirected. Taking the address of a DLL function from loaded code
-  yields a jump island, so that address can differ between objects.
+- **The ARM64 RTS linker support is new** (section 2) and covered only by
+  the testsuite. The `SECTION` relocation (debug info) isn't implemented.
+  Loaded objects can be relocated against thread-local variables (`SECREL*`),
+  but the linker doesn't set up thread-local storage for them, so that code
+  must not actually touch those variables. This matches x86_64. A far
+  reference to *data* in a DLL (more than about 3GB from `ghc.exe`) is
+  reported as an error rather than redirected. Taking the address of a DLL
+  function from loaded code yields a jump island, so that address can differ
+  between objects.
+- **Hand-written Cmm that uses `STK_CHK_GEN_N` in a procedure without an info
+  table doesn't assemble** (testsuite `T9329`):
+  `assembler label '.Lc6_info' can not be undefined`. Without
+  tables-next-to-code, which Windows ARM64 doesn't use, GHC only emits an info
+  table for a procedure's own entry. Haskell code and the RTS's own Cmm aren't
+  affected. Unregisterised builds, which also lack tables-next-to-code, have
+  this test marked as broken.
 - No documentation is built (`--docs=none`; Sphinx isn't installed).
 - Sections 1–5 were validated with the commands above. Section 6 is
   validated as described in its status note. None of this is covered by
@@ -385,4 +407,7 @@ stops with *"Can't detect Windows terminal type"* when it has no console.
 | `unknown symbol '$L.text_1'` when GHCi loads `libHSghc-internal` | The `IMAGE_SYM_CLASS_LABEL` part of the RTS linker fix (section 2) is missing. |
 | Thousands of testsuite failures, mostly `[stderr mismatch]`, with source snippets (`8 \| …` and `^^^`) in the actual output | The `RunTest.hs` fix (section 2) is missing. |
 | `Can't detect Windows terminal type` from the testsuite | Run Hadrian's `test` from a terminal window (section 6.5). |
+| SIMD tests print huge or garbage values in the first lanes of a vector | The `AArch64/Ppr.hs` fix (section 2) is missing. |
+| `unhandled ARM64 PEi386 relocation type 0xa` loading `libc++abi.a` | The `SECREL*` part of the RTS linker fix (section 2) is missing. |
+| Profiling tests miss cost centres such as `runMainIO` or `$fTraversable…` | Build with the `late_ccs` flavour transformer (section 6.4). |
 | `lld: error: unable to find library -lHS…-inplace` in the native build | Apply step 6.1, then `rm -rf _build-native && mkdir -p _build-native/mingw` and build again. |

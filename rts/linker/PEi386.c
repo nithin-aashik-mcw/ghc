@@ -480,6 +480,10 @@ static size_t makeSymbolExtra_PEi386(
 #define IMAGE_REL_ARM64_REL21           0x0005
 #define IMAGE_REL_ARM64_PAGEOFFSET_12A  0x0006
 #define IMAGE_REL_ARM64_PAGEOFFSET_12L  0x0007
+#define IMAGE_REL_ARM64_SECREL          0x0008
+#define IMAGE_REL_ARM64_SECREL_LOW12A   0x0009
+#define IMAGE_REL_ARM64_SECREL_HIGH12A  0x000A
+#define IMAGE_REL_ARM64_SECREL_LOW12L   0x000B
 #define IMAGE_REL_ARM64_ADDR64          0x000E
 #define IMAGE_REL_ARM64_BRANCH19        0x000F
 #define IMAGE_REL_ARM64_BRANCH14        0x0010
@@ -493,6 +497,7 @@ static bool relocate_ARM64(
     uint16_t type,
     uint8_t* P,
     size_t S,
+    size_t secStart,
     uint64_t symIndex,
     COFF_symbol* sym,
     SymType sym_type);
@@ -2399,8 +2404,37 @@ static bool relocateBranch_ARM64(ObjectCode* oc, uint16_t type, uint8_t* P, size
     return true;
 }
 
+/* ADD (immediate): add value to imm12, which holds the addend.  */
+static void addImm12_ARM64(uint8_t* P, uint32_t value)
+{
+    uint32_t insn = *(uint32_t *) P;
+    uint32_t imm = ((insn >> 10) & 0xfff) + value;
+    *(uint32_t *) P = (insn & ~(UINT32_C(0xfff) << 10)) | ((imm & 0xfff) << 10);
+}
+
+/* LDR/STR (unsigned offset): like addImm12_ARM64, but imm12 is scaled by the
+   access size.  */
+static bool addLdrImm12_ARM64(ObjectCode* oc, COFF_symbol* sym, uint16_t type,
+                              uint8_t* P, uint32_t offset)
+{
+    uint32_t insn = *(uint32_t *) P;
+    uint32_t size = insn >> 30;
+    if ((insn & 0x4800000) == 0x4800000) {
+        size += 4; /* 128-bit SIMD/FP access */
+    }
+    if (offset & ((UINT32_C(1) << size) - 1)) {
+        relocError_ARM64(oc, sym, type, "misaligned load/store offset");
+        return false;
+    }
+    addImm12_ARM64(P, offset >> size);
+    return true;
+}
+
+/* secStart is the start of the section that defines the target, or 0 if the
+   target isn't defined in this object. Only SECREL* relocations use it.  */
 static bool relocate_ARM64(ObjectCode* oc, uint16_t type, uint8_t* P, size_t S,
-                           uint64_t symIndex, COFF_symbol* sym, SymType sym_type)
+                           size_t secStart, uint64_t symIndex, COFF_symbol* sym,
+                           SymType sym_type)
 {
     uint32_t insn = *(uint32_t *) P;
 
@@ -2409,8 +2443,7 @@ static bool relocate_ARM64(ObjectCode* oc, uint16_t type, uint8_t* P, size_t S,
 
     /* Code outside the linker's 2GB window is reached through a jump island.
        See Note [ARM64 jump islands].  */
-    if (type != IMAGE_REL_ARM64_ADDR64 && type != IMAGE_REL_ARM64_ADDR32
-        && !isNearImage_ARM64(S)) {
+    if (relocMayNeedIsland_ARM64(type) && !isNearImage_ARM64(S)) {
         if (sym_type & (SYM_TYPE_DATA | SYM_TYPE_INDIRECT_DATA)) {
             relocError_ARM64(oc, sym, type, "data symbol out of PC-relative range");
             return false;
@@ -2484,27 +2517,49 @@ static bool relocate_ARM64(ObjectCode* oc, uint16_t type, uint8_t* P, size_t S,
             return true;
         }
 
-        /* ADD: low 12 bits of the target, plus the addend in imm12.  */
-        case IMAGE_REL_ARM64_PAGEOFFSET_12A: {
-            uint32_t imm = ((insn >> 10) & 0xfff) + (uint32_t) ((uint64_t) S & 0xfff);
-            *(uint32_t *) P = (insn & ~(UINT32_C(0xfff) << 10)) | ((imm & 0xfff) << 10);
+        /* ADD/LDR/STR: low 12 bits of the target.  */
+        case IMAGE_REL_ARM64_PAGEOFFSET_12A:
+            addImm12_ARM64(P, (uint32_t) ((uint64_t) S & 0xfff));
             return true;
-        }
+        case IMAGE_REL_ARM64_PAGEOFFSET_12L:
+            return addLdrImm12_ARM64(oc, sym, type, P, (uint32_t) ((uint64_t) S & 0xfff));
 
-        /* LDR/STR (unsigned offset): imm12 is scaled by the access size.  */
-        case IMAGE_REL_ARM64_PAGEOFFSET_12L: {
-            uint32_t size = insn >> 30;
-            if ((insn & 0x4800000) == 0x4800000) {
-                size += 4; /* 128-bit SIMD/FP access */
-            }
-            uint32_t off = (uint32_t) ((uint64_t) S & 0xfff);
-            if (off & ((UINT32_C(1) << size) - 1)) {
-                relocError_ARM64(oc, sym, type, "misaligned load/store offset");
+        /* Offset of the target from the start of its section. Used for
+           thread-local variables, e.g. by libc++abi. Note that the RTS linker
+           doesn't set up TLS for loaded objects, so such code loads but
+           mustn't touch its thread-local variables.  */
+        case IMAGE_REL_ARM64_SECREL:
+        case IMAGE_REL_ARM64_SECREL_LOW12A:
+        case IMAGE_REL_ARM64_SECREL_HIGH12A:
+        case IMAGE_REL_ARM64_SECREL_LOW12L: {
+            if (secStart == 0 || S < secStart) {
+                relocError_ARM64(oc, sym, type, "section-relative target not defined in this object");
                 return false;
             }
-            uint32_t imm = ((insn >> 10) & 0xfff) + (off >> size);
-            *(uint32_t *) P = (insn & ~(UINT32_C(0xfff) << 10)) | ((imm & 0xfff) << 10);
-            return true;
+            uint64_t secrel = (uint64_t) S - (uint64_t) secStart;
+            switch (type) {
+                case IMAGE_REL_ARM64_SECREL: {
+                    uint64_t v = secrel + insn;
+                    if (v > UINT32_MAX) {
+                        relocError_ARM64(oc, sym, type, "section offset doesn't fit in 32 bits");
+                        return false;
+                    }
+                    *(uint32_t *) P = (uint32_t) v;
+                    return true;
+                }
+                case IMAGE_REL_ARM64_SECREL_LOW12A:
+                    addImm12_ARM64(P, (uint32_t) (secrel & 0xfff));
+                    return true;
+                case IMAGE_REL_ARM64_SECREL_HIGH12A:
+                    if ((secrel >> 12) > 0xfff) {
+                        relocError_ARM64(oc, sym, type, "section offset doesn't fit in 24 bits");
+                        return false;
+                    }
+                    addImm12_ARM64(P, (uint32_t) (secrel >> 12));
+                    return true;
+                default: /* IMAGE_REL_ARM64_SECREL_LOW12L */
+                    return addLdrImm12_ARM64(oc, sym, type, P, (uint32_t) (secrel & 0xfff));
+            }
         }
 
         default:
@@ -2583,6 +2638,11 @@ ocResolve_PEi386 ( ObjectCode* oc )
          /* LABEL symbols are section-relative too: on ARM64, LLVM emits
             `$L.<section>_N` labels every 1MB because ADRP can't encode
             larger addends.  */
+#if defined(aarch64_HOST_ARCH)
+         /* Start of the section defining the target, for SECREL
+            relocations; 0 if it isn't in this object.  */
+         size_t secStart = 0;
+#endif
          uint8_t storage_class = getSymStorageClass (info, sym);
          if (storage_class == IMAGE_SYM_CLASS_STATIC
              || storage_class == IMAGE_SYM_CLASS_LABEL) {
@@ -2601,6 +2661,9 @@ ocResolve_PEi386 ( ObjectCode* oc )
             Section section = oc->sections[sect_n - 1];
             S = ((size_t)(section.start))
               + ((size_t)(getSymValue (info, sym)));
+#if defined(aarch64_HOST_ARCH)
+            secStart = (size_t) section.start;
+#endif
          } else {
             copyName ( getSymShortName (info, sym), oc, symbol,
                        sizeof(symbol)-1 );
@@ -2610,6 +2673,17 @@ ocResolve_PEi386 ( ObjectCode* oc )
                 releaseOcInfo (oc);
                 return false;
             }
+#if defined(aarch64_HOST_ARCH)
+            /* An external symbol may still be defined in this object.  */
+            uint32_t sect_n = getSymSectionNumber (info, sym);
+            if (sect_n > 0 && sect_n <= numberOfSections) {
+                Section *def = &oc->sections[sect_n - 1];
+                if (def->start != NULL && S >= (size_t) def->start
+                    && S < (size_t) def->start + def->size) {
+                    secStart = (size_t) def->start;
+                }
+            }
+#endif
          }
          IF_DEBUG(linker_verbose, debugBelch("S=%zx\n", S));
 
@@ -2699,7 +2773,7 @@ ocResolve_PEi386 ( ObjectCode* oc )
             default:
                (void) A;
                if (!relocate_ARM64(oc, reloc->Type, (uint8_t *) pP, S,
-                                   symIndex, sym, sym_type)) {
+                                   secStart, symIndex, sym, sym_type)) {
                    releaseOcInfo (oc);
                    return false;
                }

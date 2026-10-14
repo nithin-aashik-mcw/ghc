@@ -102,6 +102,7 @@ test('T25790', [only_ways(ghci_ways), extra_ways(["ghci-opt"])], ghci_script, ['
 test('T25636f',
      just_ghci + [
       extra_hc_opts("-package ghci -package ghc-heap"),
+      when(tables_next_to_code(), extra_hc_opts("-DTABLES_NEXT_TO_CODE")),
       when(arch('wasm32'), skip)
      ],
      compile_and_run,

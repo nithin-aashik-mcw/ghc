@@ -11,7 +11,13 @@ void unpack_closure
     , StgClosure *** outPointers // Array of all pointers of the TSO
     )
 {
+    // peekItbl expects the pointer unpackClosure# returns, which without
+    // tables-next-to-code is one word past the struct (after `entry`).
+#if defined(TABLES_NEXT_TO_CODE)
     *outInfoTablePtr = get_itbl(inClosure);
+#else
+    *outInfoTablePtr = (const StgInfoTable *) ((StgWord *) get_itbl(inClosure) + 1);
+#endif
 
     // Copy TSO pointers.
     StgWord closureSizeW = heap_view_closureSize(inClosure);

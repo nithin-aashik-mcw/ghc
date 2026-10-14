@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE LambdaCase #-}
@@ -124,9 +125,17 @@ main = do
         , resolvedStaticConIsUnlifted = False
         }
 
+-- TABLES_NEXT_TO_CODE is defined by all.T.
+tablesNextToCode :: Bool
+#if defined(TABLES_NEXT_TO_CODE)
+tablesNextToCode = True
+#else
+tablesNextToCode = False
+#endif
+
 mkInfoTable :: Int -> Int -> String -> IO (RemotePtr Heap.StgInfoTable)
 mkInfoTable tag ptrs desc =
-  toRemotePtr <$> mkConInfoTable True ptrs 0 (tag - 1) tag (BS.pack desc)
+  toRemotePtr <$> mkConInfoTable tablesNextToCode ptrs 0 (tag - 1) tag (BS.pack desc)
 
 extractBoxedRef :: HValueRef -> IO String
 extractBoxedRef ref = do
