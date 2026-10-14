@@ -217,6 +217,9 @@ test('T20275', [unless(js_arch(),extra_ways(['optasm']))], compile_and_run, ['']
                # that's the original reproducer for #25771
 
 test('CallConv', [when(unregisterised(), skip),
+                  # The assembly returns by jumping to the info pointer on
+                  # the stack, which is only code with tables-next-to-code.
+                  unless(tables_next_to_code(), skip),
                   unless(arch('x86_64') or arch('aarch64'), skip),
                   when(arch('x86_64'), extra_hc_opts('CallConv_x86_64.s')),
                   when(arch('aarch64'), extra_hc_opts('CallConv_aarch64.s'))],

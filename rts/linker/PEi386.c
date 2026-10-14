@@ -2308,7 +2308,9 @@ static void reserveJumpIslands_ARM64(ObjectCode* oc)
             if (idx >= n_syms || seen[idx] || !relocMayNeedIsland_ARM64(reloc->Type))
                 continue;
             /* Symbols of this object are always in range. */
-            if (getSymStorageClass (info, &oc->info->symbols[idx]) == IMAGE_SYM_CLASS_STATIC)
+            uint8_t storage_class = getSymStorageClass (info, &oc->info->symbols[idx]);
+            if (storage_class == IMAGE_SYM_CLASS_STATIC
+                || storage_class == IMAGE_SYM_CLASS_LABEL)
                 continue;
             seen[idx] = 1;
             count++;
@@ -2578,7 +2580,12 @@ ocResolve_PEi386 ( ObjectCode* oc )
                             printName (getSymShortName (info, sym), oc);
                   debugBelch("'\n" ));
 
-         if (getSymStorageClass (info, sym) == IMAGE_SYM_CLASS_STATIC) {
+         /* LABEL symbols are section-relative too: on ARM64, LLVM emits
+            `$L.<section>_N` labels every 1MB because ADRP can't encode
+            larger addends.  */
+         uint8_t storage_class = getSymStorageClass (info, sym);
+         if (storage_class == IMAGE_SYM_CLASS_STATIC
+             || storage_class == IMAGE_SYM_CLASS_LABEL) {
             uint32_t sect_n = getSymSectionNumber (info, sym);
             switch (sect_n) {
                 case PE_SECTION_UNDEFINED:

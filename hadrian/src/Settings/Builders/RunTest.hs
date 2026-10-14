@@ -29,9 +29,11 @@ runTestGhcFlags :: Stage -> Action String
 runTestGhcFlags stage = do
     unregisterised <- queryTargetTarget stage tgtUnregisterised
 
-    let ifMinGhcVer ver opt = do v <- ghcCanonVersion
-                                 if ver <= v then pure opt
-                                             else pure ""
+    -- Compare numerically: as strings, "801" > "1001" (GHC 10.1).
+    let ifMinGhcVer :: String -> String -> Action String
+        ifMinGhcVer ver opt = do v <- ghcCanonVersion
+                                 if (read ver :: Int) <= read v then pure opt
+                                                                else pure ""
 
     -- Read extra argument for test from command line, like `-fvectorize`.
     ghcOpts <- fromMaybe "" <$> (liftIO $ lookupEnv "EXTRA_HC_OPTS")

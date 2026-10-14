@@ -9,8 +9,7 @@ GHC exists to bootstrap from, so the build goes through two stages:
 2. That cross-compiler builds the **native ARM64** `ghc.exe` and the other
    programs (Hadrian "stage3").
 3. Optionally, that native ARM64 GHC bootstraps a second, fully native build
-   with an interpreter (section 6). GHCi doesn't work yet on Windows ARM64
-   (section 7).
+   with GHCi and Template Haskell (section 6).
 
 Tested against GHC `10.1` (master at `f217fc315b`). Windows ARM64 support first
 appeared in the 9.14 release line.
@@ -63,6 +62,9 @@ on Windows hits the bugs below. The fixes are in this working tree:
 | `configure.ac`, `m4/prep_target_file.m4`, `hadrian/cfg/default.host.target.in` | The host target had no windres, so the stage1 compiler failed to link any executable: `builderMainLoop: invalid argument`. An empty merge-objects command became `"."`. | windres comes from the bootstrap GHC's `--info`. Merge-objects is `Nothing` when empty. |
 | `utils/hsc2hs/src/ATTParser.hs` (submodule) | clang ≥ 21 emits CodeView `.debug$S` records on COFF, and hsc2hs `--via-asm` attached them to the last constant: `Cannot combine instructions: [Quad 8,Long 4,Long 241,…]`. No clang flag disables these records. | The parser drops `.debug*` sections. |
 | `utils/ghc-pkg/Main.hs` | `ghc-pkg describe --expand-pkgroot` didn't expand `${pkgroot}` in `library-dirs-static`. Hadrian copies the bootstrap compiler's packages this way, so static links searched the wrong directory: `lld: error: unable to find library -lHSbase-…`. Only matters when bootstrapping (section 6). | `mungePackagePaths` now expands `libraryDirsStatic` too, like GHC's own `mungeUnitInfoPaths`. |
+| `rts/linker/PEi386.c`, `rts/linker/PEi386Types.h` | GHCi's object loader had only placeholder ARM64 support, so `ghc -e`, `ghci` and Template Haskell failed with `PE/PE+ not supported on ARM64.` | Implements the ARM64 COFF relocations, jump islands for far targets (see `Note [ARM64 jump islands]`), `.pdata` registration and instruction-cache flushing. Also treats `IMAGE_SYM_CLASS_LABEL` symbols (LLVM's `$L.text_N`) as local. |
+| `hadrian/src/Settings/Builders/RunTest.hs` | `ifMinGhcVer` compared versions as strings, so with a 10.x bootstrap compiler (`"1001"` < `"801"`) the testsuite ran without `-fno-diagnostics-show-caret` and three other flags. About 3,400 tests failed with `stderr mismatch`. | Compares the versions as numbers. |
+| `testsuite/tests/codeGen/should_run/all.T` | `CallConv`'s assembly only works with tables-next-to-code, which Windows ARM64 doesn't use. It crashed with *"Access violation … when executing data"*. | Skip the test without tables-next-to-code. |
 
 > `utils/hsc2hs` is a submodule, so `git status` shows it as modified (`m`).
 > Commit that change in the submodule if you want to keep it.
@@ -206,12 +208,12 @@ The installed compiler calls the MSYS2 clangarm64 tools by absolute path
 
 The compiler from section 5 has no interpreter (see section 7). This section
 builds GHC again **natively**, using `C:\ghc-arm64` as the bootstrap compiler.
-The result includes an interpreter. GHCi still can't load code until the RTS
-linker supports ARM64 (see section 7).
+The result includes GHCi and Template Haskell. These need the RTS linker fix
+from section 2.
 
-> **Status:** these steps take the build through Hadrian's setup and the
-> stage0 tools. The full native build hasn't been run to completion yet, so
-> later stages may hit problems not covered here.
+> **Status:** the native build completes. `ghc -e`, Template Haskell
+> splices, and a sample of GHCi, Template Haskell and annotation tests pass
+> (see 6.5). The full testsuite hasn't been rerun since the fixes in section 2.
 
 The bootstrap compiler is a development snapshot (`10.1.x`), not a release.
 Hackage packages and Hadrian don't fully support it yet, which is why
@@ -318,6 +320,27 @@ If you ran the build before doing step 6.1, delete `_build-native` first
 (`rm -rf _build-native`), then recreate `_build-native/mingw`. Hadrian doesn't redo package copies it already made,
 so stale copies with the unexpanded `${pkgroot}` would remain.
 
+### 6.5 Check the result
+
+The native compiler is `_build-native/stage1/bin/ghc.exe` (Hadrian's stage1
+directory holds the stage2 compiler):
+
+```bash
+G=_build-native/stage1/bin/ghc.exe
+$G -e 1+2                                   # 3
+$G -e 'sum [1..100 :: Integer]'             # 5050
+```
+
+To run the testsuite, use the same Hadrian flags and add `test`. Use
+`--only="name1 name2"` to run individual tests:
+
+```bash
+hadrian/build -j --build-root=_build-native --flavour=default+native_bignum --docs=none test
+```
+
+Run it from a terminal (the MSYS2 CLANGARM64 window). The testsuite driver
+stops with *"Can't detect Windows terminal type"* when it has no console.
+
 ---
 
 ## 7. Known limitations
@@ -325,17 +348,16 @@ so stale copies with the unexpanded `${pkgroot}` would remain.
 - **No GHCi or Template Haskell in the stage3 compiler.** A GHC built by a
   cross-compiler has no internal interpreter, so `ghc -e` and `ghci` report
   *"not built for interactive use"*. `ghc-iserv` isn't part of the cross
-  build's stage2 package set.
-- **GHCi and Template Haskell don't work in the native build (section 6)
-  either.** That compiler has an interpreter, but `ghc -e 1+2` fails with
-  `PE/PE+ not supported on ARM64.` GHC's runtime loader for Windows object
-  files (`rts/linker/PEi386.c`) only has placeholder ARM64 support: it rejects
-  every ARM64 object, implements none of the ARM64 relocations, and doesn't
-  register ARM64 unwind tables. Making this work means implementing those
-  pieces in the RTS.
+  build's stage2 package set. Use the native build from section 6 instead.
+- **The ARM64 RTS linker support is new** (section 2) and only partly tested.
+  The section-relative relocations (`SECREL*`, `SECTION`) aren't implemented.
+  None of the installed libraries use them. A far reference to *data* in a
+  DLL (more than about 3GB from `ghc.exe`) is reported as an error rather
+  than redirected. Taking the address of a DLL function from loaded code
+  yields a jump island, so that address can differ between objects.
 - No documentation is built (`--docs=none`; Sphinx isn't installed).
-- Sections 1–5 were validated with the commands above. Section 6 is only
-  partly validated (see the status note there). None of this is covered by
+- Sections 1–5 were validated with the commands above. Section 6 is
+  validated as described in its status note. None of this is covered by
   upstream CI.
 
 ---
@@ -359,5 +381,8 @@ so stale copies with the unexpanded `${pkgroot}` would remain.
 | `Could not resolve dependencies … hashable => base … <4.23` | Create `hadrian/cabal.project.local` (section 6.2). |
 | `Could not load module 'GHC.Num.BigNat'` building hashable | The `package hashable` stanza in `hadrian/cabal.project.local` is missing (section 6.2). |
 | `panic! … Invalid platform constants` compiling `utils/unlit/unlit.c` | The native build reused the cross build's `_build`. Use `--build-root=_build-native` (section 6.4). |
-| `PE/PE+ not supported on ARM64.` from `ghc -e` or `ghci` | Not yet supported: the RTS linker has no ARM64 Windows implementation (section 7). |
+| `PE/PE+ not supported on ARM64.` from `ghc -e` or `ghci` | The RTS linker fix (section 2) is missing. |
+| `unknown symbol '$L.text_1'` when GHCi loads `libHSghc-internal` | The `IMAGE_SYM_CLASS_LABEL` part of the RTS linker fix (section 2) is missing. |
+| Thousands of testsuite failures, mostly `[stderr mismatch]`, with source snippets (`8 \| …` and `^^^`) in the actual output | The `RunTest.hs` fix (section 2) is missing. |
+| `Can't detect Windows terminal type` from the testsuite | Run Hadrian's `test` from a terminal window (section 6.5). |
 | `lld: error: unable to find library -lHS…-inplace` in the native build | Apply step 6.1, then `rm -rf _build-native && mkdir -p _build-native/mingw` and build again. |
