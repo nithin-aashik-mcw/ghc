@@ -58,7 +58,7 @@ libzstd-lib-dir       =
 use-lib-zstd      = NO
 static-lib-zstd   = NO
 use-lib-numa      = NO
-use-lib-rt        = YES
+use-lib-rt        = @UseLibrtHost@
 use-lib-bfd       = NO
 need-libatomic    = NO
 

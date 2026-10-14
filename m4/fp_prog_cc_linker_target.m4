@@ -6,10 +6,13 @@
 # $2 - Variable which contains the options passed to the C compiler when compiling a C file
 # $3 - Variable which contains the options passed to the C compiler when used as
 #      a linker
+# $4 - LLVM triple to pass (optional, defaults to $LlvmTarget). The stage0
+#      compiler must use the build platform's triple, not the target's.
 AC_DEFUN([FP_PROG_CC_LINKER_TARGET],
 [
     AC_MSG_CHECKING([whether $1 used as a linker understands --target])
 
+    fp_cc_llvm_triple="m4_default([$4], [$LlvmTarget])"
     echo 'int foo() { return 0; }' > conftest1.c
     echo 'int main() { return 0; }' > conftest2.c
     "$1" $$2 -c conftest1.c || AC_MSG_ERROR([Failed to compile conftest1.c])
@@ -20,9 +23,9 @@ AC_DEFUN([FP_PROG_CC_LINKER_TARGET],
         # See Note [Don't pass --target to emscripten toolchain] in GHC.Toolchain.Program
         CONF_CC_SUPPORTS_TARGET=NO
         AC_MSG_RESULT([no])
-    elif "$1" $$3 --target=$LlvmTarget -o conftest conftest1.o conftest2.o;
+    elif "$1" $$3 --target=$fp_cc_llvm_triple -o conftest conftest1.o conftest2.o;
     then
-        $3="--target=$LlvmTarget $$3"
+        $3="--target=$fp_cc_llvm_triple $$3"
         AC_MSG_RESULT([yes])
     else
         AC_MSG_RESULT([no])

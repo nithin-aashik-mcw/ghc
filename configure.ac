@@ -185,6 +185,8 @@ if test "$WithGhc" != ""; then
   if test -z "$AR_STAGE0"; then
     BOOTSTRAPPING_GHC_INFO_FIELD([AR_STAGE0],[ar command])
   fi
+  dnl Needed by the stage1 compiler to link executables on Windows hosts
+  BOOTSTRAPPING_GHC_INFO_FIELD([WindresCmd_STAGE0],[windres command])
   BOOTSTRAPPING_GHC_INFO_FIELD([AR_OPTS_STAGE0],[ar flags])
   BOOTSTRAPPING_GHC_INFO_FIELD([ArSupportsAtFile_STAGE0],[ar supports at file])
   BOOTSTRAPPING_GHC_INFO_FIELD([ArSupportsDashL_STAGE0],[ar supports -L])
@@ -679,13 +681,18 @@ GHC_LLVM_TARGET_SET_VAR
 # The target is substituted into the distrib/configure.ac file
 AC_SUBST(LlvmTarget)
 
+dnl The stage0 C compiler produces code for the build platform, so when
+dnl cross-compiling with a clang-based bootstrap toolchain (e.g. on Windows) it
+dnl must be given the build platform's triple, not the target's.
+GHC_LLVM_TARGET([$build],[$build_cpu],[$build_vendor],[$build_os],[LlvmBuildTarget])
+
 dnl ** See whether cc supports --target=<triple> and set
 dnl CONF_CC_OPTS_STAGE[012] accordingly.
-FP_CC_SUPPORTS_TARGET([$CC_STAGE0], [CONF_CC_OPTS_STAGE0], [CONF_CXX_OPTS_STAGE0])
+FP_CC_SUPPORTS_TARGET([$CC_STAGE0], [CONF_CC_OPTS_STAGE0], [CONF_CXX_OPTS_STAGE0], [$LlvmBuildTarget])
 FP_CC_SUPPORTS_TARGET([$CC], [CONF_CC_OPTS_STAGE1], [CONF_CXX_OPTS_STAGE1])
 FP_CC_SUPPORTS_TARGET([$CC], [CONF_CC_OPTS_STAGE2], [CONF_CXX_OPTS_STAGE2])
 
-FP_PROG_CC_LINKER_TARGET([$CC_STAGE0], [CONF_CC_OPTS_STAGE0], [CONF_GCC_LINKER_OPTS_STAGE0])
+FP_PROG_CC_LINKER_TARGET([$CC_STAGE0], [CONF_CC_OPTS_STAGE0], [CONF_GCC_LINKER_OPTS_STAGE0], [$LlvmBuildTarget])
 FP_PROG_CC_LINKER_TARGET([$CC], [CONF_CC_OPTS_STAGE1], [CONF_GCC_LINKER_OPTS_STAGE1])
 FP_PROG_CC_LINKER_TARGET([$CC], [CONF_CC_OPTS_STAGE2], [CONF_GCC_LINKER_OPTS_STAGE2])
 
@@ -902,6 +909,14 @@ AC_SUBST([LeadingUnderscore], [`echo $fptools_cv_leading_underscore | sed 'y/yes
 dnl ** check for librt
 AC_CHECK_LIB([rt], [clock_gettime], UseLibrt=YES, UseLibrt=NO)
 AC_SUBST([UseLibrt])
+
+dnl The check above uses the target toolchain, so it cannot tell us whether the
+dnl host has librt. Windows and Darwin never do.
+case "$HostOS" in
+  mingw32|darwin) UseLibrtHost=NO ;;
+  *)              UseLibrtHost=YES ;;
+esac
+AC_SUBST([UseLibrtHost])
 
 GHC_ADJUSTORS_METHOD([Target])
 AC_SUBST([UseLibffiForAdjustors])

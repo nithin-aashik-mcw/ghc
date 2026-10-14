@@ -214,6 +214,15 @@ AC_DEFUN([PREP_TARGET_FILE],[
     PREP_BOOLEAN([LdIsGNULd_STAGE0])
     PREP_BOOLEAN([LdHasFilelist_STAGE0])
     PREP_BOOLEAN([CONF_GCC_SUPPORTS_NO_PIE_STAGE0])
+    PREP_MAYBE_SIMPLE_PROGRAM([WindresCmd_STAGE0])
+
+    dnl Bootstrap compilers on Windows report an empty merge objects command
+    if test -z "$LD_STAGE0"; then
+      MergeObjsCmd_STAGE0Maybe=Nothing
+    else
+      MergeObjsCmd_STAGE0Maybe="Just (MergeObjs {mergeObjsProgram = Program {prgPath = \"$LD_STAGE0\", prgFlags = @<:@\"-r\"@:>@}, mergeObjsSupportsResponseFiles = False})"
+    fi
+    AC_SUBST([MergeObjsCmd_STAGE0Maybe])
 
     if test -z "$MergeObjsCmd"; then
       MergeObjsCmdMaybe=Nothing

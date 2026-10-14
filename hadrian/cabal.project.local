@@ -1,0 +1,6 @@
+-- Local workaround for bootstrapping with a GHC devel snapshot (base-4.23).
+allow-newer: all
+
+-- base-4.23 no longer exposes GHC.Num.{BigNat,Integer,Natural} (CLC #359).
+package hashable
+  ghc-options: -package ghc-bignum

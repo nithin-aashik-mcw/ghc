@@ -469,6 +469,35 @@ static size_t makeSymbolExtra_PEi386(
     SymType sym_type);
 #endif
 
+#if defined(aarch64_HOST_ARCH)
+/* ARM64 COFF relocation types, from the PE format specification. MinGW's
+   winnt.h doesn't define them. */
+#define IMAGE_REL_ARM64_ABSOLUTE        0x0000
+#define IMAGE_REL_ARM64_ADDR32          0x0001
+#define IMAGE_REL_ARM64_ADDR32NB        0x0002
+#define IMAGE_REL_ARM64_BRANCH26        0x0003
+#define IMAGE_REL_ARM64_PAGEBASE_REL21  0x0004
+#define IMAGE_REL_ARM64_REL21           0x0005
+#define IMAGE_REL_ARM64_PAGEOFFSET_12A  0x0006
+#define IMAGE_REL_ARM64_PAGEOFFSET_12L  0x0007
+#define IMAGE_REL_ARM64_ADDR64          0x000E
+#define IMAGE_REL_ARM64_BRANCH19        0x000F
+#define IMAGE_REL_ARM64_BRANCH14        0x0010
+#define IMAGE_REL_ARM64_REL32           0x0011
+
+static void reserveJumpIslands_ARM64(
+    ObjectCode* oc);
+
+static bool relocate_ARM64(
+    ObjectCode* oc,
+    uint16_t type,
+    uint8_t* P,
+    size_t S,
+    uint64_t symIndex,
+    COFF_symbol* sym,
+    SymType sym_type);
+#endif
+
 static void addDLLHandle(
     const pathchar* dll_name,
     HINSTANCE instance);
@@ -690,6 +719,9 @@ void freePreloadObjectFile_PEi386(ObjectCode *oc)
         if (oc->info->ch_info) {
            stgFree (oc->info->ch_info);
         }
+#if defined(aarch64_HOST_ARCH)
+        stgFree (oc->info->sym_islands);
+#endif
         stgFree (oc->info);
         oc->info = NULL;
     }
@@ -705,6 +737,9 @@ static void releaseOcInfo(ObjectCode* oc) {
         stgFree (oc->info->ch_info);
         stgFree (oc->info->symbols);
         stgFree (oc->info->str_tab);
+#if defined(aarch64_HOST_ARCH)
+        stgFree (oc->info->sym_islands);
+#endif
         stgFree (oc->info);
         oc->info = NULL;
     }
@@ -1351,7 +1386,6 @@ verifyCOFFHeader ( uint16_t machine, IMAGE_FILE_HEADER *hdr,
       errorBelch("%" PATH_FMT ": Not a ARM64 PE+ file.", fileName);
       return false;
    }
-   errorBelch("PE/PE+ not supported on ARM64.");
 #else
    errorBelch("PE/PE+ not supported on this arch.");
 #endif
@@ -1852,6 +1886,12 @@ ocGetNames_PEi386 ( ObjectCode* oc )
                   SECTIONKIND_OTHER, SECTION_NOMEM, NULL, 0, 0, 0, 0);
    }
 
+#if defined(aarch64_HOST_ARCH)
+   /* Allocate jump islands right after this object's sections so that its
+      branches can reach them. See Note [ARM64 jump islands].  */
+   reserveJumpIslands_ARM64(oc);
+#endif
+
    /* At this point we're done with oc->image and all relevant memory have
       been copied. Release it to free up the memory.  */
    stgFree (oc->image);
@@ -2181,6 +2221,299 @@ void ocProtectExtras(ObjectCode* oc STG_UNUSED) { }
 
 #endif /* x86_64_HOST_ARCH */
 
+#if defined(aarch64_HOST_ARCH)
+
+/*
+  Note [ARM64 jump islands]
+  ~~~~~~~~~~~~~~~~~~~~~~~~~
+  AArch64 code reaches other code and data through PC-relative instructions
+  with a limited range:
+
+    * B/BL (IMAGE_REL_ARM64_BRANCH26) reach +/-128MB, B.cond/CBZ (BRANCH19)
+      +/-1MB and TBZ (BRANCH14) +/-32KB.
+    * ADRP (PAGEBASE_REL21) reaches +/-4GB. It is paired with an ADD or a
+      load/store (PAGEOFFSET_12A/12L) that supplies the low 12 bits.
+
+  All memory the linker allocates lies within 2GB above the image base of the
+  executable (see allocateLocalBytes in linker/MMap.c), so ADRP always reaches
+  code and data of other loaded objects and of the executable itself. Two
+  kinds of targets are out of range:
+
+    * targets in system DLLs, which Windows maps far from the executable, and
+    * branch targets more than 128MB away inside the 2GB window.
+
+  We route such references through a jump island:
+
+      ldr x16, #8       // load the target address stored below
+      br  x16
+      .quad target
+
+  AAPCS64 allows x16 (IP0) to be clobbered between a call and its target, so
+  this is invisible to the caller. Taking the address of a far function
+  yields the island's address, which behaves like the function. Far *data*
+  can't be redirected this way and is reported as an error.
+
+  A branch island must itself be in range of the branch, so
+  ocGetNames_PEi386 reserves one island for each external symbol that may
+  need one, right after allocating the object's sections, and
+  ocResolve_PEi386 fills them in on demand. Each symbol gets at most one
+  island, so the ADRP and the ADD/LDR of a pair always agree on the target.
+
+  The relocation arithmetic follows lld (lld/COFF/Chunks.cpp): COFF stores
+  addends in the instruction's immediate field, not in the relocation.
+*/
+
+#define ARM64_ISLAND_SIZE 16
+
+static int64_t signExtend64(uint64_t value, unsigned bits)
+{
+    return (int64_t) (value << (64 - bits)) >> (64 - bits);
+}
+
+/* Can this relocation type refer to a target through a jump island? */
+static bool relocMayNeedIsland_ARM64(uint16_t type)
+{
+    switch (type) {
+        case IMAGE_REL_ARM64_ADDR32NB:
+        case IMAGE_REL_ARM64_BRANCH26:
+        case IMAGE_REL_ARM64_BRANCH19:
+        case IMAGE_REL_ARM64_BRANCH14:
+        case IMAGE_REL_ARM64_PAGEBASE_REL21:
+        case IMAGE_REL_ARM64_REL21:
+        case IMAGE_REL_ARM64_PAGEOFFSET_12A:
+        case IMAGE_REL_ARM64_PAGEOFFSET_12L:
+        case IMAGE_REL_ARM64_REL32:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static void reserveJumpIslands_ARM64(ObjectCode* oc)
+{
+    COFF_HEADER_INFO *info = oc->info->ch_info;
+    uint32_t n_syms = info->numberOfSymbols;
+    if (n_syms == 0)
+        return;
+
+    uint8_t *seen = stgCallocBytes(n_syms, 1, "reserveJumpIslands_ARM64");
+    uint32_t count = 0;
+    for (uint32_t i = 0; i < info->numberOfSections; i++) {
+        Section *section = &oc->sections[i];
+        if (section->kind == SECTIONKIND_DEBUG || !section->info)
+            continue;
+        for (uint32_t j = 0; j < section->info->noRelocs; j++) {
+            COFF_reloc *reloc = &section->info->relocs[j];
+            uint32_t idx = reloc->SymbolTableIndex;
+            if (idx >= n_syms || seen[idx] || !relocMayNeedIsland_ARM64(reloc->Type))
+                continue;
+            /* Symbols of this object are always in range. */
+            if (getSymStorageClass (info, &oc->info->symbols[idx]) == IMAGE_SYM_CLASS_STATIC)
+                continue;
+            seen[idx] = 1;
+            count++;
+        }
+    }
+    stgFree(seen);
+
+    if (count > 0) {
+        oc->info->islands = m32_alloc(oc->rx_m32, (size_t) count * ARM64_ISLAND_SIZE, 8);
+        if (oc->info->islands == NULL) {
+            barf("reserveJumpIslands_ARM64: failed to allocate %u jump islands", count);
+        }
+        oc->info->n_islands = count;
+    }
+}
+
+/* Return the jump island for symbol symIndex, creating it if needed. */
+static size_t makeJumpIsland_ARM64(ObjectCode* oc, uint64_t symIndex, size_t target)
+{
+    struct ObjectCodeFormatInfo *info = oc->info;
+    if (info->sym_islands[symIndex] != NULL) {
+        return (size_t) info->sym_islands[symIndex];
+    }
+
+    uint8_t *island;
+    if (info->used_islands < info->n_islands) {
+        island = info->islands + (size_t) info->used_islands++ * ARM64_ISLAND_SIZE;
+    } else {
+        /* Only reached for symbols of this object; see reserveJumpIslands_ARM64. */
+        island = m32_alloc(oc->rx_m32, ARM64_ISLAND_SIZE, 8);
+        CHECK(island);
+    }
+
+    uint32_t *insns = (uint32_t *) island;
+    insns[0] = 0x58000050; /* ldr x16, #8 */
+    insns[1] = 0xd61f0200; /* br  x16     */
+    *(uint64_t *) (island + 8) = (uint64_t) target;
+    FlushInstructionCache(GetCurrentProcess(), island, ARM64_ISLAND_SIZE);
+
+    IF_DEBUG(linker_verbose, debugBelch("makeJumpIsland_ARM64: %p -> %zx\n", island, target));
+    info->sym_islands[symIndex] = island;
+    return (size_t) island;
+}
+
+/* Is addr within ADRP range (+/-4GB) of all memory the linker allocates? That
+   memory lies in [base, base + 2GB), see Note [ARM64 jump islands].  */
+static bool isNearImage_ARM64(size_t addr)
+{
+    uint64_t base = (uint64_t) (uintptr_t) GetModuleHandleW(NULL);
+    return (uint64_t) addr + (UINT64_C(1) << 30) >= base
+        && (uint64_t) addr < base + (UINT64_C(3) << 30);
+}
+
+static void relocError_ARM64(ObjectCode* oc, COFF_symbol* sym, uint16_t type, const char* what)
+{
+    uint8_t name[1000];
+    copyName (getSymShortName (oc->info->ch_info, sym), oc, name, sizeof(name)-1);
+    errorBelch("%" PATH_FMT ": ARM64 relocation type 0x%x against `%s': %s",
+               oc->fileName, type, (char *) name, what);
+}
+
+/* B/BL, B.cond/CBZ/CBNZ and TBZ/TBNZ: a word offset in bits [lsb, lsb+width). */
+static bool relocateBranch_ARM64(ObjectCode* oc, uint16_t type, uint8_t* P, size_t S,
+                                 uint64_t symIndex, COFF_symbol* sym,
+                                 unsigned lsb, unsigned width)
+{
+    uint32_t insn = *(uint32_t *) P;
+    uint32_t mask = ((UINT32_C(1) << width) - 1) << lsb;
+    int64_t addend = signExtend64((insn & mask) >> lsb, width) * 4;
+    int64_t limit = INT64_C(1) << (width + 1);
+    int64_t v = (int64_t) S + addend - (int64_t) (uintptr_t) P;
+
+    if (v < -limit || v >= limit) {
+        if (addend != 0) {
+            relocError_ARM64(oc, sym, type, "branch with addend out of range");
+            return false;
+        }
+        S = makeJumpIsland_ARM64(oc, symIndex, S);
+        v = (int64_t) S - (int64_t) (uintptr_t) P;
+        if (v < -limit || v >= limit) {
+            relocError_ARM64(oc, sym, type, "jump island out of branch range");
+            return false;
+        }
+    }
+    *(uint32_t *) P = (insn & ~mask) | (((uint32_t) (v >> 2) << lsb) & mask);
+    return true;
+}
+
+static bool relocate_ARM64(ObjectCode* oc, uint16_t type, uint8_t* P, size_t S,
+                           uint64_t symIndex, COFF_symbol* sym, SymType sym_type)
+{
+    uint32_t insn = *(uint32_t *) P;
+
+    if (type == IMAGE_REL_ARM64_ABSOLUTE)
+        return true;
+
+    /* Code outside the linker's 2GB window is reached through a jump island.
+       See Note [ARM64 jump islands].  */
+    if (type != IMAGE_REL_ARM64_ADDR64 && type != IMAGE_REL_ARM64_ADDR32
+        && !isNearImage_ARM64(S)) {
+        if (sym_type & (SYM_TYPE_DATA | SYM_TYPE_INDIRECT_DATA)) {
+            relocError_ARM64(oc, sym, type, "data symbol out of PC-relative range");
+            return false;
+        }
+        S = makeJumpIsland_ARM64(oc, symIndex, S);
+    }
+
+    switch (type) {
+        case IMAGE_REL_ARM64_ADDR64:
+            checkProddableBlock(&oc->proddables, P, 8);
+            *(uint64_t *) P = (uint64_t) S + *(uint64_t *) P;
+            return true;
+
+        case IMAGE_REL_ARM64_ADDR32: {
+            uint64_t v = (uint64_t) S + insn;
+            if (v > UINT32_MAX) {
+                relocError_ARM64(oc, sym, type, "address doesn't fit in 32 bits");
+                return false;
+            }
+            *(uint32_t *) P = (uint32_t) v;
+            return true;
+        }
+
+        /* Image-relative address, e.g. in .pdata/.xdata.
+           See Note [Exception Unwinding].  */
+        case IMAGE_REL_ARM64_ADDR32NB: {
+            int64_t v = (int64_t) ((uint64_t) S + insn
+                                   - (uint64_t) (uintptr_t) GetModuleHandleW(NULL));
+            if (v < 0 || v > (int64_t) UINT32_MAX) {
+                relocError_ARM64(oc, sym, type, "image-relative address out of range");
+                return false;
+            }
+            *(uint32_t *) P = (uint32_t) v;
+            return true;
+        }
+
+        case IMAGE_REL_ARM64_REL32: {
+            int64_t v = (int64_t) S + (int32_t) insn - (int64_t) (uintptr_t) P - 4;
+            if (v < INT32_MIN || v > INT32_MAX) {
+                relocError_ARM64(oc, sym, type, "PC-relative address out of range");
+                return false;
+            }
+            *(int32_t *) P = (int32_t) v;
+            return true;
+        }
+
+        case IMAGE_REL_ARM64_BRANCH26:
+            return relocateBranch_ARM64(oc, type, P, S, symIndex, sym, 0, 26);
+        case IMAGE_REL_ARM64_BRANCH19:
+            return relocateBranch_ARM64(oc, type, P, S, symIndex, sym, 5, 19);
+        case IMAGE_REL_ARM64_BRANCH14:
+            return relocateBranch_ARM64(oc, type, P, S, symIndex, sym, 5, 14);
+
+        /* ADRP (page delta) and ADR (byte delta). The addend is the signed
+           21-bit immediate immhi:immlo, in bytes.  */
+        case IMAGE_REL_ARM64_PAGEBASE_REL21:
+        case IMAGE_REL_ARM64_REL21: {
+            unsigned shift = type == IMAGE_REL_ARM64_PAGEBASE_REL21 ? 12 : 0;
+            int64_t addend = signExtend64(((insn >> 29) & 0x3) | ((insn >> 3) & 0x1ffffc), 21);
+            uint64_t target = (uint64_t) S + (uint64_t) addend;
+            int64_t v = (int64_t) (target >> shift)
+                      - (int64_t) ((uint64_t) (uintptr_t) P >> shift);
+            if (v < -(INT64_C(1) << 20) || v >= (INT64_C(1) << 20)) {
+                relocError_ARM64(oc, sym, type, "ADRP/ADR target out of range");
+                return false;
+            }
+            uint32_t mask = (UINT32_C(0x3) << 29) | (UINT32_C(0x1ffffc) << 3);
+            *(uint32_t *) P = (insn & ~mask)
+                            | (((uint32_t) v & 0x3) << 29)
+                            | (((uint32_t) v & 0x1ffffc) << 3);
+            return true;
+        }
+
+        /* ADD: low 12 bits of the target, plus the addend in imm12.  */
+        case IMAGE_REL_ARM64_PAGEOFFSET_12A: {
+            uint32_t imm = ((insn >> 10) & 0xfff) + (uint32_t) ((uint64_t) S & 0xfff);
+            *(uint32_t *) P = (insn & ~(UINT32_C(0xfff) << 10)) | ((imm & 0xfff) << 10);
+            return true;
+        }
+
+        /* LDR/STR (unsigned offset): imm12 is scaled by the access size.  */
+        case IMAGE_REL_ARM64_PAGEOFFSET_12L: {
+            uint32_t size = insn >> 30;
+            if ((insn & 0x4800000) == 0x4800000) {
+                size += 4; /* 128-bit SIMD/FP access */
+            }
+            uint32_t off = (uint32_t) ((uint64_t) S & 0xfff);
+            if (off & ((UINT32_C(1) << size) - 1)) {
+                relocError_ARM64(oc, sym, type, "misaligned load/store offset");
+                return false;
+            }
+            uint32_t imm = ((insn >> 10) & 0xfff) + (off >> size);
+            *(uint32_t *) P = (insn & ~(UINT32_C(0xfff) << 10)) | ((imm & 0xfff) << 10);
+            return true;
+        }
+
+        default:
+            debugBelch("%" PATH_FMT ": unhandled ARM64 PEi386 relocation type 0x%x\n",
+                       oc->fileName, type);
+            return false;
+    }
+}
+
+#endif /* aarch64_HOST_ARCH */
+
 bool
 ocResolve_PEi386 ( ObjectCode* oc )
 {
@@ -2202,6 +2535,11 @@ ocResolve_PEi386 ( ObjectCode* oc )
 
    COFF_HEADER_INFO *info = oc->info->ch_info;
    uint32_t numberOfSections = info->numberOfSections;
+
+#if defined(aarch64_HOST_ARCH)
+   oc->info->sym_islands = stgCallocBytes(info->numberOfSymbols + 1, sizeof(uint8_t*),
+                                          "ocResolve_PEi386(sym_islands)");
+#endif
 
    for (i = 0; i < numberOfSections; i++) {
       Section section = oc->sections[i];
@@ -2227,7 +2565,8 @@ ocResolve_PEi386 ( ObjectCode* oc )
          uint64_t symIndex = reloc->SymbolTableIndex;
          sym = &oc->info->symbols[symIndex];
 
-         SymType sym_type;
+         /* Symbols defined in this object don't get a type below. */
+         SymType sym_type = SYM_TYPE_CODE;
 
          IF_DEBUG(linker_verbose,
                   debugBelch(
@@ -2346,25 +2685,25 @@ ocResolve_PEi386 ( ObjectCode* oc )
                    *(uint32_t *)pP = (uint32_t)v;
                    break;
                }
-#elif defined(aarch64_HOST_ARCH)
-            case 1: // IMAGE_REL_ARM64_ADDR32, see https://llvm.org/doxygen/namespacellvm_1_1COFF.html, https://learn.microsoft.com/en-us/windows/win32/debug/pe-format#arm64-processors
-               {
-                    // We have to put this stub due of errors like:
-                    // warning: variable 'A' set but not used.
-                    uint64_t v;
-                    v = S + A;
-
-                    debugBelch("%" PATH_FMT ": Catch ARM64 PEi386 relocation type %d, %llx\n",
-                        oc->fileName, reloc->Type, v);
-                    releaseOcInfo (oc);
-                    return false;
-               }
 #endif
+#if defined(aarch64_HOST_ARCH)
+            /* ARM64 relocations keep their addend in the instruction, so
+               relocate_ARM64 reads it there rather than using A.  */
+            default:
+               (void) A;
+               if (!relocate_ARM64(oc, reloc->Type, (uint8_t *) pP, S,
+                                   symIndex, sym, sym_type)) {
+                   releaseOcInfo (oc);
+                   return false;
+               }
+               break;
+#else
             default:
                debugBelch("%" PATH_FMT ": unhandled PEi386 relocation type %d\n",
                      oc->fileName, reloc->Type);
                releaseOcInfo (oc);
                return false;
+#endif
          }
 
       }
@@ -2373,7 +2712,9 @@ ocResolve_PEi386 ( ObjectCode* oc )
          See Note [Exception Unwinding].  */
       if (section.kind == SECTIONKIND_EXCEPTION_TABLE) {
           oc->info->pdata = &oc->sections[i];
-#if defined(x86_64_HOST_ARCH)
+#if defined(x86_64_HOST_ARCH) || defined(aarch64_HOST_ARCH)
+          /* RUNTIME_FUNCTION is the architecture's .pdata entry: 12 bytes on
+             x86_64, 8 bytes on ARM64.  */
           unsigned numEntries = section.size / sizeof(RUNTIME_FUNCTION);
           if (numEntries == 0)
             continue;
@@ -2388,11 +2729,25 @@ ocResolve_PEi386 ( ObjectCode* oc )
             releaseOcInfo (oc);
             return false;
           }
-#endif /* x86_64_HOST_ARCH.  */
+#endif /* x86_64_HOST_ARCH || aarch64_HOST_ARCH.  */
       } else if (section.kind == SECTIONKIND_EXCEPTION_UNWIND) {
           oc->info->xdata = &oc->sections[i];
       }
    }
+
+#if defined(aarch64_HOST_ARCH)
+   /* We patched instructions through the data cache; make sure the CPU
+      doesn't execute stale instructions. Jump islands are flushed by
+      makeJumpIsland_ARM64.  */
+   for (i = 0; i < (unsigned int) oc->n_sections; i++) {
+      Section *s = &oc->sections[i];
+      if (s->kind == SECTIONKIND_CODE_OR_RODATA && s->start != NULL && s->size > 0) {
+         FlushInstructionCache(GetCurrentProcess(), s->start, s->size);
+      }
+   }
+   stgFree(oc->info->sym_islands);
+   oc->info->sym_islands = NULL;
+#endif
 
    // We now have no more need of info->ch_info and info->symbols.
    stgFree(oc->info->ch_info);
