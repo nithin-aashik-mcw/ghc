@@ -372,11 +372,13 @@ stops with *"Can't detect Windows terminal type"* when it has no console.
   between objects.
 - **Hand-written Cmm that uses `STK_CHK_GEN_N` in a procedure without an info
   table doesn't assemble** (testsuite `T9329`):
-  `assembler label '.Lc6_info' can not be undefined`. Without
-  tables-next-to-code, which Windows ARM64 doesn't use, GHC only emits an info
-  table for a procedure's own entry. Haskell code and the RTS's own Cmm aren't
-  affected. Unregisterised builds, which also lack tables-next-to-code, have
-  this test marked as broken.
+  `assembler label '.Lc6_info' can not be undefined`. In a procedure with no
+  arguments, the stack check's slow path returns to the procedure's entry
+  block. Without tables-next-to-code, which Windows ARM64 doesn't use, that
+  entry block never gets an info table. Procedures with arguments return to a
+  later block, which does get one, so Haskell code and the RTS's own Cmm aren't
+  affected. The test is marked as broken for every build without
+  tables-next-to-code, unregisterised builds included.
 - No documentation is built (`--docs=none`; Sphinx isn't installed).
 - Sections 1–5 were validated with the commands above. Section 6 is
   validated as described in its status note. None of this is covered by

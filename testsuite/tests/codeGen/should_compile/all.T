@@ -25,7 +25,7 @@ test('T7574', [cmm_src, omit_ways(llvm_ways)], compile, ['-no-hs-main'])
 test('T8205', normal, compile, ['-O0'])
 test('T9155', normal, compile, ['-O2'])
 test('T9303', normal, compile, ['-O2'])
-test('T9329', [when(unregisterised(), expect_broken(15467)), cmm_src], compile, ['-no-hs-main'])
+test('T9329', [when(unregisterised() or not tables_next_to_code(), expect_broken(15467)), cmm_src], compile, ['-no-hs-main'])
 
 test('debug',
   [ normal,

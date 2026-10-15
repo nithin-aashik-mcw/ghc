@@ -41,7 +41,8 @@ test('hReady002',
       omit_ghci,
       multi_cpu_race,
       js_broken(22374),
-      when(arch('wasm32'), fragile(23275))],
+      when(arch('wasm32'), fragile(23275)),
+      when(opsys('mingw32'), fragile(4078))],
      compile_and_run, [''])
 
 test('hSeek001', normal, compile_and_run, [''])
