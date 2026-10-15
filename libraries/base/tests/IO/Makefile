@@ -6,13 +6,16 @@ TOP=../../../../testsuite
 include $(TOP)/mk/boilerplate.mk
 include $(TOP)/mk/test.mk
 
+# The child thread must print before the input arrives. Allow a few seconds:
+# on Windows the first run of a freshly linked executable can take well over
+# a second to start (e.g. while it is scanned by antivirus).
 test.concio001:
 	"$(TEST_HC)" $(TEST_HC_OPTS) --make -fforce-recomp -v0 concio001 -o concio001
-	(sleep 1; echo x) | ./concio001
+	(sleep 3; echo x) | ./concio001
 
 test.concio001.thr:
 	"$(TEST_HC)" $(TEST_HC_OPTS) --make -fforce-recomp -v0 -threaded concio001 -o concio001
-	(sleep 1; echo x) | ./concio001
+	(sleep 3; echo x) | ./concio001
 
 # NB. utf8-test should *not* have a final newline.  The last char should be 'X'.
 utf16-test: utf8-test
