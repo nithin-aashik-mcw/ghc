@@ -529,11 +529,18 @@ function configure() {
 #
 # The job caches both (see jobCache in .gitlab/generate-ci/gen_ci.hs) and
 # rebuilds them only when they are missing; bump CACHE_REV to force that.
+#
+# hadrian/cabal.project.local is only for building Hadrian with the snapshot
+# (BUILD-WINDOWS-ARM64.md, B.2). Here Hadrian is always built with the x86_64
+# GHC, where its allow-newer lets cabal pick a file-io that doesn't compile, so
+# the job removes it.
 
 function bootstrap_winarm64() {
   if [ "${MSYSTEM:-}" != "CLANGARM64" ]; then
     fail "bootstrap_winarm64 is only for MSYSTEM=CLANGARM64"
   fi
+
+  rm -f hadrian/cabal.project.local
 
   if [ ! -f "$GHC_WIN32_TARBALLS_MIRROR/aarch64/MANIFEST" ]; then
     start_section winarm64-toolchain "Make aarch64 toolchain mirror"
