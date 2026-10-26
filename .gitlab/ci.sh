@@ -158,6 +158,10 @@ function mingw_init() {
       # GHC-built tools such as hsc2hs use the console code page, and the
       # sources contain UTF-8. There may be no console under gitlab-runner.
       chcp.com 65001 > /dev/null 2>&1 || true
+      # cabal installs into store/*/incoming/new-N/<the store's full path>, so
+      # a store under the build directory overruns MAX_PATH and the install
+      # fails. Keep it short, outside the build directory.
+      export CABAL_DIR="$(cygpath -w "${WINARM64_CABAL_DIR:-$SYSTEMDRIVE/cabal-arm64}")"
       ;;
     *)
       fail "win32-init: Unknown MSYSTEM $MSYSTEM"
