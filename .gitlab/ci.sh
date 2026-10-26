@@ -1046,6 +1046,9 @@ function run_abi_test() {
 }
 
 function save_test_output() {
+    # The directory is missing if the job failed before the testsuite ran.
+    # Don't fail then, so that the rest of after_script (clean) still runs.
+    mkdir -p unexpected-test-output
     tar -czf unexpected-test-output.tar.gz unexpected-test-output
 }
 

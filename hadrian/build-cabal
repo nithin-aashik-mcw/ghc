@@ -36,7 +36,17 @@ if ! [ -d "$REMOTE_REPO_CACHE/hackage.haskell.org" ]; then
     exit 2
 fi
 
-"$CABAL" --project-file="$PROJ" new-build "${CABFLAGS[@]}" -j exe:hadrian
+# On Windows AArch64, the x86_64 helpers that hsc2hs builds and runs (such as
+# Clock_hsc_make.exe) are briefly held open by the emulator's translation cache
+# after they exit, so cabal can fail to remove its temporary build directory.
+# Retry; the packages already built are kept in the store.
+attempts=1
+if [ "${MSYSTEM:-}" = "CLANGARM64" ]; then attempts=3; fi
+for attempt in $(seq "$attempts"); do
+    "$CABAL" --project-file="$PROJ" new-build "${CABFLAGS[@]}" -j exe:hadrian && break
+    if [ "$attempt" -eq "$attempts" ]; then exit 1; fi
+    echo "Building Hadrian failed; retrying ($attempt/$attempts)"
+done
 # use new-exec instead of new-run to make sure that the build-tools (alex & happy) are in PATH
 "$CABAL" --project-file="$PROJ" new-exec  "${CABFLAGS[@]}"    hadrian -- \
     --directory "$PWD" \
