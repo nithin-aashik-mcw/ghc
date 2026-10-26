@@ -1076,6 +1076,12 @@ function clean() {
   # uploaded. Keep in sync with `jobArtifacts` in
   # `.gitlab/generate-ci/gen_ci.hs`!
   if [[ "${CI_DISPOSABLE_ENVIRONMENT:-}" != true ]]; then
+    # An interrupted cabal install can leave paths longer than MAX_PATH under
+    # store/*/incoming, which the runner's own (PowerShell) cleanup can't
+    # remove, failing the next job. MSYS2's rm can.
+    if [ "${MSYSTEM:-}" = "CLANGARM64" ]; then
+      rm -rf cabal cabal-cache
+    fi
     git submodule --quiet foreach --recursive git clean -xdfq
     git clean -xdfq \
       --exclude=ghc-arm64-boot \
