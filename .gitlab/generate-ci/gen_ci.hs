@@ -743,6 +743,7 @@ data ValidateRule
   | WinArm64     -- ^ Run this job when the "aarch64" and "Windows" labels are set together without "LLVM backend"
   | WinArm64LLVM -- ^ Run this job when the "aarch64" and "Windows" labels are set together with "LLVM backend"
   | LoongArch64  -- ^ Run this job when the "LoongArch64" labal is present
+  | DevBranch    -- ^ Run this job on the "dev" branch (Windows AArch64 testing)
   deriving (Show, Ord, Eq)
 
 -- | Convert the state of the rule into a string that gitlab understand.
@@ -797,6 +798,7 @@ validateRuleString WinArm64LLVM = and_all
                                     , validateRuleString LLVMBackend
                                     ]
 validateRuleString LoongArch64  = labelString "loongarch"
+validateRuleString DevBranch    = branchStringExact "dev"
 
 ---------------------------------------------------------------------
 -- The Job type
@@ -965,7 +967,11 @@ job arch opsys buildConfig = NamedJob { name = jobName, jobInfo = Job {..} }
 
     jobAllowFailure = False
     jobStage = "full-build"
-    jobNeeds = ["hadrian-ghc-in-ghci"]
+    -- Windows AArch64 doesn't wait for hadrian-ghc-in-ghci, so that it can run
+    -- without the Linux runners.
+    jobNeeds
+      | Windows <- opsys, AArch64 <- arch = []
+      | otherwise = ["hadrian-ghc-in-ghci"]
 
 ---------------------------------------------------------------------------
 -- Job Modifiers
@@ -1273,10 +1279,12 @@ windows_x86 =
   ]
 
 -- Native build on a Windows AArch64 runner. In merge requests it runs only with
--- the "aarch64" and "Windows" labels, like the Linux-hosted cross job.
+-- the "aarch64" and "Windows" labels, like the Linux-hosted cross job. It also
+-- runs in every pipeline on the "dev" branch.
 windows_aarch64 :: [JobGroup Job]
 windows_aarch64 =
-  [ addValidateRule WinArm64 (disableValidate (validateBuilds AArch64 Windows nativeInt))
+  [ addValidateRule DevBranch
+      (addValidateRule WinArm64 (disableValidate (validateBuilds AArch64 Windows nativeInt)))
   ]
 
 darwin :: [JobGroup Job]

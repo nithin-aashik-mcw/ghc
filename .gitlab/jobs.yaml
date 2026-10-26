@@ -579,15 +579,10 @@
     },
     "dependencies": [],
     "image": null,
-    "needs": [
-      {
-        "artifacts": false,
-        "job": "hadrian-ghc-in-ghci"
-      }
-    ],
+    "needs": [],
     "rules": [
       {
-        "if": "((($ONLY_JOBS) && ($ONLY_JOBS =~ /.*\\baarch64-windows-int_native-validate(\\s|$).*/)) || (($ONLY_JOBS == null) && ((($CI_MERGE_REQUEST_LABELS =~ /.*aarch64.*/) && ($CI_MERGE_REQUEST_LABELS =~ /.*Windows.*/))))) && ($RELEASE_JOB != \"yes\") && ($NIGHTLY == null)",
+        "if": "((($ONLY_JOBS) && ($ONLY_JOBS =~ /.*\\baarch64-windows-int_native-validate(\\s|$).*/)) || (($ONLY_JOBS == null) && ((($CI_MERGE_REQUEST_LABELS =~ /.*aarch64.*/) && ($CI_MERGE_REQUEST_LABELS =~ /.*Windows.*/)) || ($CI_COMMIT_BRANCH == \"dev\")))) && ($RELEASE_JOB != \"yes\") && ($NIGHTLY == null)",
         "when": "on_success"
       }
     ],
@@ -1458,12 +1453,7 @@
     },
     "dependencies": [],
     "image": null,
-    "needs": [
-      {
-        "artifacts": false,
-        "job": "hadrian-ghc-in-ghci"
-      }
-    ],
+    "needs": [],
     "rules": [
       {
         "if": "(\"true\" == \"true\") && ($RELEASE_JOB != \"yes\") && ($NIGHTLY)",
