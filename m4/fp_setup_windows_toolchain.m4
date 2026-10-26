@@ -1,12 +1,21 @@
 # Download and install the windows toolchain
 AC_DEFUN([FP_INSTALL_WINDOWS_TOOLCHAIN],[
     # Find the mingw-w64 archive file to extract.
-    if test "$HostArch" = "x86_64"
-    then
+    case "$HostArch" in
+    x86_64)
         mingw_arch="x86_64"
         tarball_dest_dir="mingw-w64/x86_64"
         tarball_mingw_dir="clang64"
-    fi
+        ;;
+    aarch64)
+        mingw_arch="aarch64"
+        tarball_dest_dir="mingw-w64/aarch64"
+        tarball_mingw_dir="clangarm64"
+        ;;
+    *)
+        AC_MSG_ERROR([No bundled Windows toolchain for $HostArch; use --enable-distro-toolchain])
+        ;;
+    esac
 
     set_up_tarballs() {
         AC_MSG_NOTICE([Checking for Windows toolchain tarballs...])
@@ -44,6 +53,19 @@ AC_DEFUN([FP_INSTALL_WINDOWS_TOOLCHAIN],[
             ;;
         esac
 
+        # inplace/mingw may hold another architecture's toolchain (e.g. the
+        # x86_64 one used to cross-compile to aarch64), in which case we
+        # re-extract. Trees without the marker file predate it and are x86_64.
+        if test -d inplace/mingw
+        then
+            existing_arch=$(cat inplace/mingw/.ghc-mingw-arch 2>/dev/null || echo x86_64)
+            if test "$existing_arch" != "$mingw_arch"
+            then
+                AC_MSG_NOTICE([Replacing the $existing_arch toolchain in inplace/mingw with $mingw_arch])
+                rm -rf inplace/mingw
+            fi
+        fi
+
         # Extract all the tarballs in one go
         if ! test -d inplace/mingw
         then
@@ -58,6 +80,7 @@ AC_DEFUN([FP_INSTALL_WINDOWS_TOOLCHAIN],[
             cd .. ) || AC_MSG_ERROR([Could not extract Windows toolchains.])
 
             mv "inplace/${tarball_mingw_dir}" inplace/mingw &&
+            echo "$mingw_arch" > inplace/mingw/.ghc-mingw-arch &&
             touch inplace/mingw
             AC_MSG_NOTICE([In-tree MingW-w64 tree created])
         fi
@@ -92,7 +115,7 @@ AC_DEFUN([FP_SETUP_WINDOWS_TOOLCHAIN],[
     mingwbin="$mingw_prefix/bin/"
     mingwlib="$mingw_prefix/lib"
     mingwinclude="$mingw_prefix/include"
-    mingw_mingw32_lib="$mingw_prefix/x86_64-w64-mingw32/lib"
+    mingw_mingw32_lib="$mingw_prefix/$HostArch-w64-mingw32/lib"
 
     CC="${mingwbin}clang.exe"
     CXX="${mingwbin}clang++.exe"

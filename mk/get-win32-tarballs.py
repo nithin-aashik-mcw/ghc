@@ -5,13 +5,24 @@ from pathlib import Path
 import urllib.request
 import subprocess
 import argparse
+import os
 import sys
 from sys import stderr
 
 TARBALL_VERSION = '0.9'
 BASE_URL = "https://downloads.haskell.org/ghc/mingw/{}".format(TARBALL_VERSION)
 DEST = Path('ghc-tarballs/mingw-w64')
+# Architectures fetched by 'all' (e.g. for source distributions).
 ARCHS = ['x86_64', 'sources']
+# aarch64 isn't published on downloads.haskell.org; it must come from a mirror
+# made with mk/make-win32-tarballs.sh (see BUILD-WINDOWS-ARM64.md).
+EXTRA_ARCHS = ['aarch64']
+
+# GHC_WIN32_TARBALLS_MIRROR overrides BASE_URL. It may be a URL or a local
+# directory with the same layout (<arch>/MANIFEST, <arch>/SHA256SUMS, ...).
+mirror = os.environ.get('GHC_WIN32_TARBALLS_MIRROR')
+if mirror:
+    BASE_URL = mirror if '://' in mirror else Path(mirror).resolve().as_uri()
 
 def file_url(arch: str, fname: str) -> str:
     return "{base}/{arch}/{fname}".format(
@@ -60,8 +71,8 @@ def main() -> None:
     parser.add_argument('mode', choices=['verify', 'download', 'list'])
     parser.add_argument(
         'arch',
-        choices=ARCHS + ['all'],
-        help="Architecture to fetch (either x86_64, sources, or all)")
+        choices=ARCHS + EXTRA_ARCHS + ['all'],
+        help="Architecture to fetch (either x86_64, aarch64, sources, or all)")
     args = parser.parse_args()
 
     action = { 'download' : fetch_arch, 'verify' : verify, 'list' : list_arch }[args.mode]

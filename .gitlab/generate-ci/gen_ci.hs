@@ -315,6 +315,7 @@ runnerTag arch (Linux _) =
 runnerTag AArch64 Darwin  = "aarch64-darwin"
 runnerTag Amd64 Darwin    = "x86_64-darwin-m1"
 runnerTag Amd64 Windows   = "new-x86_64-windows"
+runnerTag AArch64 Windows = "aarch64-windows"
 runnerTag Amd64 FreeBSD14 = "x86_64-freebsd14"
 runnerTag _ _             = error "Invalid arch/opsys"
 
@@ -482,6 +483,17 @@ opsysVariables Amd64 (Darwin {}) = mconcat
     -- Fonts can't be installed on darwin
   , "HADRIAN_ARGS" =: "--docs=no-sphinx-pdfs"
 
+  ]
+opsysVariables AArch64 (Windows {}) = mconcat
+  [ "MSYSTEM" =: "CLANGARM64"
+  , "LANG" =: "en_US.UTF-8"
+  , "CABAL_INSTALL_VERSION" =: "3.14.2.0"
+  , "HADRIAN_ARGS" =: "--docs=none"
+    -- The x86_64 GHC (run under emulation) builds the tools, Hadrian and the
+    -- aarch64 bootstrap compiler; see Note [Windows AArch64 bootstrap] in
+    -- .gitlab/ci.sh. That bootstrap compiler is a development snapshot.
+  , "FETCH_GHC_VERSION" =: "9.10.3"
+  , "CONFIGURE_ARGS" =: "--enable-bootstrap-with-devel-snapshot"
   ]
 opsysVariables _ (Windows {}) = mconcat
   [ "MSYSTEM" =: "CLANG64"
@@ -849,8 +861,9 @@ job arch opsys buildConfig = NamedJob { name = jobName, jobInfo = Job {..} }
 
     jobScript
       | Windows <- opsys
-      = [ "bash .gitlab/ci.sh setup"
-        , "bash .gitlab/ci.sh configure"
+      = [ "bash .gitlab/ci.sh setup" ] ++
+        [ "bash .gitlab/ci.sh bootstrap_winarm64" | AArch64 <- [arch] ] ++
+        [ "bash .gitlab/ci.sh configure"
         , "bash .gitlab/ci.sh build_hadrian"
         , "bash .gitlab/ci.sh test_hadrian"
         ]
@@ -934,6 +947,12 @@ job arch opsys buildConfig = NamedJob { name = jobName, jobInfo = Job {..} }
       }
 
     jobCache
+        -- Windows AArch64 caches the bootstrap compiler and toolchain mirror
+        -- made by `ci.sh bootstrap_winarm64` (not the cabal store, see below).
+        -- Bump CACHE_REV to rebuild them.
+      | Windows <- opsys, AArch64 <- arch =
+          Cache { cachePaths = [ "ghc-arm64-boot", "ghc-mingw-mirror" ]
+                , cacheKey = "aarch64-windows-bootstrap-$CACHE_REV" }
         -- N.B. We have temporarily disabled cabal-install store caching on
         -- Windows due to #21347.
       | Windows <- opsys =
@@ -1253,6 +1272,13 @@ windows_x86 =
   , disableValidate (standardBuildsWithConfig Amd64 Windows nativeInt)
   ]
 
+-- Native build on a Windows AArch64 runner. In merge requests it runs only with
+-- the "aarch64" and "Windows" labels, like the Linux-hosted cross job.
+windows_aarch64 :: [JobGroup Job]
+windows_aarch64 =
+  [ addValidateRule WinArm64 (disableValidate (validateBuilds AArch64 Windows nativeInt))
+  ]
+
 darwin :: [JobGroup Job]
 darwin =
   [ addValidateRule TestPrimops (standardBuilds Amd64 Darwin)
@@ -1380,6 +1406,7 @@ job_groups =
   ++ debian_i386
   ++ fedora_x86
   ++ windows_x86
+  ++ windows_aarch64
   ++ darwin
   ++ ubuntu_x86
   ++ rhel_x86

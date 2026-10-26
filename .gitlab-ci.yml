@@ -202,6 +202,8 @@ workflow:
 # * x86_64-linux: Any Docker-capable x86_64 Linux machine
 # * aarch64-linux: Any Docker-capable AArch64 Linux machine
 # * x86_64-windows: A x86_64 Windows machine
+# * aarch64-windows: An AArch64 Windows machine with MSYS2 (see
+#                    BUILD-WINDOWS-ARM64.md, "GitLab CI")
 # * lint: Any Docker-capable x86_64 Linux machine; distinct from
 #         x86_64-linux to ensure low-latency availability.
 #

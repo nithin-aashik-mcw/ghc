@@ -51,6 +51,9 @@ Common Modes:
   usage             Show this usage message.
   setup             Prepare environment for a build.
   configure         Run ./configure.
+  bootstrap_winarm64
+                    (Windows AArch64 only) Build the bootstrap compiler and
+                    bundled toolchain if missing.
   clean             Clean the tree
   shell             Run an interactive shell with a configured build environment.
   save_test_output  Generate unexpected-test-output.tar.gz
@@ -68,7 +71,7 @@ Environment variables affecting the build:
   VERBOSE           Set to non-empty for verbose build output
   RUNTEST_ARGS      Arguments passed to runtest.py
   TEST_WAYS         Testsuite ways to run
-  MSYSTEM           (Windows-only) Which platform to build from (CLANG64).
+  MSYSTEM           (Windows-only) Which platform to build from (CLANG64 or CLANGARM64).
   IGNORE_PERF_FAILURES
                     Whether to ignore perf failures (one of "increases",
                     "decreases", or "all")
@@ -143,6 +146,19 @@ function mingw_init() {
       target_triple="x86_64-unknown-mingw32"
       boot_triple="x86_64-unknown-mingw32" # triple of bootstrap GHC
       ;;
+    CLANGARM64)
+      target_triple="aarch64-unknown-mingw32"
+      # The fetched x86_64 GHC builds the tools, Hadrian and the aarch64
+      # bootstrap compiler. See Note [Windows AArch64 bootstrap].
+      boot_triple="x86_64-unknown-mingw32"
+      winarm64_boot="${WINARM64_BOOT:-$TOP/ghc-arm64-boot}"
+      CONFIGURE_GHC="$winarm64_boot/bin/ghc.exe"
+      GHC_WIN32_TARBALLS_MIRROR="${GHC_WIN32_TARBALLS_MIRROR:-$(cygpath -m "$TOP/ghc-mingw-mirror")}"
+      export GHC_WIN32_TARBALLS_MIRROR
+      # GHC-built tools such as hsc2hs use the console code page, and the
+      # sources contain UTF-8. There may be no console under gitlab-runner.
+      chcp.com 65001 > /dev/null 2>&1 || true
+      ;;
     *)
       fail "win32-init: Unknown MSYSTEM $MSYSTEM"
       ;;
@@ -156,10 +172,13 @@ function mingw_init() {
   MINGW_MOUNT_POINT="${MINGW_PREFIX}"
   PATH="$MINGW_MOUNT_POINT/bin:$PATH"
 
-  # We always use mingw64 Python to avoid path length issues like #17483.
-  export PYTHON="/mingw64/bin/python3"
+  # We always use a native (non-msys) Python to avoid path length issues like
+  # #17483: mingw64 on x86_64, and clangarm64 on aarch64 (which has no mingw64).
+  local python_prefix="/mingw64"
+  if [ "$MSYSTEM" = "CLANGARM64" ]; then python_prefix="$MINGW_PREFIX"; fi
+  export PYTHON="$python_prefix/bin/python3"
   # And need to use sphinx-build from the environment
-  export SPHINXBUILD="/mingw64/bin/sphinx-build.exe"
+  export SPHINXBUILD="$python_prefix/bin/sphinx-build.exe"
 }
 
 # This will contain GHC's local native toolchain
@@ -371,6 +390,9 @@ function fetch_cabal() {
         MSYS_*|MINGW*)
           case "$MSYSTEM" in
             CLANG64) cabal_arch="x86_64" ;;
+            # No aarch64 Windows cabal-install is published; the x86_64 one
+            # runs under emulation.
+            CLANGARM64) cabal_arch="x86_64" ;;
             *) fail "unknown MSYSTEM $MSYSTEM" ;;
           esac
           local url="https://downloads.haskell.org/~cabal/cabal-install-$v/cabal-install-$v-$cabal_arch-windows.zip"
@@ -484,9 +506,127 @@ function configure() {
   run ${CONFIGURE_WRAPPER:-} ./configure \
     --enable-tarballs-autodownload \
     "${args[@]+"${args[@]}"}" \
-    GHC="$GHC" \
+    GHC="${CONFIGURE_GHC:-$GHC}" \
     || ( cat config.log; fail "configure failed" )
   end_section "configuring"
+}
+
+# Note [Windows AArch64 bootstrap]
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# No aarch64 Windows GHC is released, so the Windows AArch64 job makes its own
+# bootstrap compiler (see BUILD-WINDOWS-ARM64.md, Part A). The x86_64 GHC
+# fetched by `setup`, running under emulation, builds an x86_64 -> aarch64
+# cross-compiler, and that builds a native aarch64 GHC in $winarm64_boot.
+# `configure` uses it as the bootstrap compiler ($CONFIGURE_GHC), while $GHC
+# (x86_64) still builds Hadrian.
+#
+# Both builds use GHC's bundled aarch64 toolchain, which downloads.haskell.org
+# doesn't publish; mk/make-win32-tarballs.sh makes it in
+# $GHC_WIN32_TARBALLS_MIRROR from the MSYS2 packages at the versions of the
+# x86_64 bundle. The cross build unpacks it into $winarm64_boot/mingw and uses
+# it as the target toolchain (--enable-distro-toolchain); MSYS2's current
+# clangarm64 can't be used there, since clang >= 21 breaks hsc2hs --via-asm.
+#
+# The job caches both (see jobCache in .gitlab/generate-ci/gen_ci.hs) and
+# rebuilds them only when they are missing; bump CACHE_REV to force that.
+
+function bootstrap_winarm64() {
+  if [ "${MSYSTEM:-}" != "CLANGARM64" ]; then
+    fail "bootstrap_winarm64 is only for MSYSTEM=CLANGARM64"
+  fi
+
+  if [ ! -f "$GHC_WIN32_TARBALLS_MIRROR/aarch64/MANIFEST" ]; then
+    start_section winarm64-toolchain "Make aarch64 toolchain mirror"
+    run mk/make-win32-tarballs.sh aarch64 "$GHC_WIN32_TARBALLS_MIRROR"
+    end_section winarm64-toolchain
+  fi
+
+  if [ ! -f "$CONFIGURE_GHC" ]; then
+    start_section winarm64-bootstrap "Build aarch64 bootstrap compiler"
+    # N.B. not `|| fail`, which would disable set -e inside the subshell.
+    ( build_winarm64_bootstrap )
+    end_section winarm64-bootstrap
+  fi
+
+  # The bootstrap compiler names its toolchain by absolute path. If the cache
+  # was restored in a different directory, point it at the new location.
+  local prefix old_prefix
+  prefix="$(cygpath -m "$winarm64_boot")"
+  old_prefix="$(cat "$winarm64_boot/.prefix")"
+  if [ "$old_prefix" != "$prefix" ]; then
+    info "Moving bootstrap compiler from $old_prefix to $prefix"
+    grep -rlIF "$old_prefix" "$winarm64_boot/lib" | while read -r f; do
+      sed -i "s|$old_prefix|$prefix|g" "$f"
+    done
+    echo "$prefix" > "$winarm64_boot/.prefix"
+  fi
+
+  # Make the bootstrap's library-dirs-static paths absolute (see
+  # BUILD-WINDOWS-ARM64.md, B.1). This is redone from the pristine copy every
+  # time, for the same reason.
+  local pkgdb="$winarm64_boot/lib/package.conf.d"
+  local libdir="$prefix/lib"
+  rm -rf "$pkgdb"
+  cp -r "$pkgdb.orig" "$pkgdb"
+  sed -i "/^library-dirs-static:/{n;s|[\$]{pkgroot}|$libdir|}" "$pkgdb"/*.conf
+  run "$winarm64_boot/bin/ghc-pkg.exe" recache
+  run "$CONFIGURE_GHC" --info
+}
+
+# Runs in a subshell: the cross-compilation settings below must not leak.
+function build_winarm64_bootstrap() {
+  # The target toolchain: the bundled aarch64 one, unpacked next to the
+  # bootstrap compiler. GHC on Windows also won't start without a mingw
+  # directory there.
+  local mirror pkg
+  mirror="$(cygpath -u "$GHC_WIN32_TARBALLS_MIRROR")"
+  rm -rf "$winarm64_boot"
+  mkdir -p "$winarm64_boot"
+  for pkg in "$mirror"/aarch64/*.pkg.tar.zst; do
+    tar --zstd -xf "$pkg" -C "$winarm64_boot"
+  done
+  rm -f "$winarm64_boot"/.{MTREE,PKGINFO,BUILDINFO,INSTALL}
+  mv "$winarm64_boot/clangarm64" "$winarm64_boot/mingw"
+  cygpath -m "$winarm64_boot" > "$winarm64_boot/.prefix"
+
+  # The x86_64 toolchain must come from downloads.haskell.org, not the mirror.
+  unset GHC_WIN32_TARBALLS_MIRROR
+
+  # C:/ paths, since GHC can't use MSYS ones.
+  local t
+  t="$(cygpath -m "$winarm64_boot/mingw/bin")"
+  export CC=$t/clang.exe CXX=$t/clang++.exe LD=$t/ld.lld.exe \
+         AR=$t/llvm-ar.exe NM=$t/llvm-nm.exe RANLIB=$t/llvm-ranlib.exe \
+         OBJDUMP=$t/llvm-objdump.exe STRIP=$t/llvm-strip.exe \
+         WindresCmd=$t/llvm-windres.exe DlltoolCmd=$t/llvm-dlltool.exe \
+         LLC=$t/llc.exe OPT=$t/opt.exe LLVMAS=$t/clang.exe MergeObjsCmd=""
+  local f="--rtlib=compiler-rt -D_UCRT"
+  export CFLAGS="$f" CONF_CC_OPTS_STAGE1="$f" CONF_CC_OPTS_STAGE2="$f"
+  export CONF_GCC_LINKER_OPTS_STAGE1="-fuse-ld=lld $f" CONF_GCC_LINKER_OPTS_STAGE2="-fuse-ld=lld $f"
+
+  run python3 boot
+  # The stage1 cross-compiler runs on x86_64 and needs the x86_64 toolchain
+  # in inplace/mingw, which --enable-distro-toolchain doesn't fetch.
+  run ./configure --build=x86_64-unknown-mingw32 --host=x86_64-unknown-mingw32 \
+    --enable-tarballs-autodownload GHC="$GHC" \
+    || ( cat config.log; fail "configure (x86_64 toolchain) failed" )
+  run ./configure --build=x86_64-unknown-mingw32 --host=x86_64-unknown-mingw32 \
+    --target=aarch64-unknown-mingw32 --enable-distro-toolchain --disable-numa \
+    GHC="$GHC" ALEX="$ALEX" HAPPY="$HAPPY" \
+    || ( cat config.log; fail "configure (cross) failed" )
+
+  local args=(--flavour=default+native_bignum --docs=none -j"$cores")
+  run hadrian/build-cabal "${args[@]}" binary-dist-dir
+  run hadrian/build-cabal "${args[@]}" \
+    stage3:exe:ghc-bin stage3:exe:ghc-pkg stage3:exe:unlit stage3:exe:hsc2hs
+
+  cp -r _build/stage2/bin _build/stage2/lib "$winarm64_boot/"
+  # The settings file names unlit with the cross prefix.
+  cp "$winarm64_boot/bin/unlit.exe" "$winarm64_boot/bin/aarch64-unknown-mingw32-unlit.exe"
+  cp -r "$winarm64_boot/lib/package.conf.d" "$winarm64_boot/lib/package.conf.d.orig"
+
+  # Leave the tree to the native build.
+  rm -rf _build
 }
 
 function fetch_perf_notes() {
@@ -931,6 +1071,8 @@ function clean() {
   if [[ "${CI_DISPOSABLE_ENVIRONMENT:-}" != true ]]; then
     git submodule --quiet foreach --recursive git clean -xdfq
     git clean -xdfq \
+      --exclude=ghc-arm64-boot \
+      --exclude=ghc-mingw-mirror \
       --exclude=ci_timings.txt \
       --exclude=ghc-*.tar.xz \
       --exclude=junit.xml \
@@ -1120,6 +1262,7 @@ case ${1:-help} in
   help|usage) usage ;;
   setup) setup && cleanup_submodules ;;
   configure) time_it "configure" configure ;;
+  bootstrap_winarm64) time_it "bootstrap" bootstrap_winarm64 ;;
   build_hadrian) time_it "build" build_hadrian ;;
   # N.B. Always push notes, even if the build fails. Metrics from runs failing
   # a perf stat check are deliberately recorded too — discarding them would
