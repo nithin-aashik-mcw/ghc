@@ -393,16 +393,17 @@ function fetch_cabal() {
         # N.B. Windows uses zip whereas all others use .tar.xz
         MSYS_*|MINGW*)
           case "$MSYSTEM" in
-            CLANG64) cabal_arch="x86_64" ;;
+            CLANG64) cabal_platform="x86_64-windows" ;;
             # No aarch64 Windows cabal-install is published; the x86_64 one
-            # runs under emulation.
-            CLANGARM64) cabal_arch="x86_64" ;;
+            # runs under emulation. Since 3.18 the Windows bindist is named
+            # x86_64-mingw64 rather than x86_64-windows.
+            CLANGARM64) cabal_platform="x86_64-mingw64" ;;
             *) fail "unknown MSYSTEM $MSYSTEM" ;;
           esac
-          local url="https://downloads.haskell.org/~cabal/cabal-install-$v/cabal-install-$v-$cabal_arch-windows.zip"
+          local url="https://downloads.haskell.org/~cabal/cabal-install-$v/cabal-install-$v-$cabal_platform.zip"
           info "Fetching cabal binary distribution from $url..."
           curl "$url" > "$TMP/cabal.zip"
-          unzip "$TMP/cabal.zip"
+          unzip -o "$TMP/cabal.zip"
           mv cabal.exe "$CABAL"
           ;;
         *)

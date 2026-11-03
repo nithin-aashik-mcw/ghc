@@ -1174,6 +1174,7 @@ bool checkAndLoadImportLibrary( pathchar* arch_name, char* member_name, FILE* f 
         errorBelch("loadArchive: error whilst reading `%s' header in `%" PATH_FMT "'. Did not read enough bytes.\n",
             member_name, arch_name);
         fseek(f, -(n + sizeof_COFF_import_Header), SEEK_CUR);
+        stgFree(image);
         return false;
     }
 
@@ -1195,18 +1196,19 @@ bool checkAndLoadImportLibrary( pathchar* arch_name, char* member_name, FILE* f 
     HINSTANCE instance;
     const char* result = addDLL_PEi386(dll, &instance);
 
-    stgFree(image);
-
     if (result != NULL) {
         errorBelch("Could not load `%" PATH_FMT "'. Reason: %s\n", dll, result);
         load_dll_warn = true;
 
+        stgFree(image);
         stgFree(dll);
         fseek(f, -(n + sizeof_COFF_import_Header), SEEK_CUR);
         return false;
     }
 
-    stgFree(dll);
+    // `symbol` points into `image` and `dll` is still needed below, so free
+    // neither until we are done with them.
+    bool ok = true;
 
     // See Note [Windows API Set]
     // We must immediately tie the symbol to the shared library.  The easiest
@@ -1215,21 +1217,28 @@ bool checkAndLoadImportLibrary( pathchar* arch_name, char* member_name, FILE* f 
     SymbolAddr* sym = lookupSymbolInDLL_PEi386 (symbol, instance, dll, NULL);
 
     // Could be an import descriptor etc, skip if no symbol.
-    if (!sym)
-      return true;
+    if (sym) {
+        // The symbol must have been found, and we can add it to the RTS symbol table
+        IF_DEBUG(linker, debugBelch("checkAndLoadImportLibrary: resolved symbol %s to %p\n", symbol, sym));
+        // Because the symbol has been loaded before we actually need it, if a
+        // stronger reference wants to add a duplicate we should discard this
+        // one to preserve link order.
+        SymType symType = SYM_TYPE_DUP_DISCARD | SYM_TYPE_HIDDEN;
+        symType |= hdr.Type == IMPORT_OBJECT_CODE ? SYM_TYPE_CODE : SYM_TYPE_DATA;
 
-    // The symbol must have been found, and we can add it to the RTS symbol table
-    IF_DEBUG(linker, debugBelch("checkAndLoadImportLibrary: resolved symbol %s to %p\n", symbol, sym));
-    // Because the symbol has been loaded before we actually need it, if a
-    // stronger reference wants to add a duplicate we should discard this
-    // one to preserve link order.
-    SymType symType = SYM_TYPE_DUP_DISCARD | SYM_TYPE_HIDDEN;
-    symType |= hdr.Type == IMPORT_OBJECT_CODE ? SYM_TYPE_CODE : SYM_TYPE_DATA;
+        // A new entry keeps its key, which must therefore outlive `image`.
+        // Such an entry has no owning object and is never removed, so the
+        // copy is never freed; this matches the names that ocGetNames_PEi386
+        // inserts. An existing entry keeps its own key.
+        const SymbolName* key = lookupStrHashTable(symhash, symbol)
+                                    ? symbol : strdup(symbol);
+        ok = ghciInsertSymbolTable(dll, symhash, key, sym, false,
+                                   symType, 0, NULL);
+    }
 
-    if (!ghciInsertSymbolTable(dll, symhash, symbol, sym, false, symType, 0, NULL))
-      return false;
-
-    return true;
+    stgFree(image);
+    stgFree(dll);
+    return ok;
 }
 
 static void

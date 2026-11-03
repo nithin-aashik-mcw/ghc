@@ -454,7 +454,7 @@ stops with *"Can't detect Windows terminal type"* when it has no console.
 Each job runs the same `ci.sh` steps as the `x86_64-windows-*` jobs, with
 one extra step, `bootstrap_winarm64`, between `setup` and `configure`:
 
-1. `setup` fetches the x86_64 GHC 9.10.3 and cabal-install, which run under
+1. `setup` fetches the x86_64 GHC 9.14.1 and cabal-install 3.18.2.0, which run under
    emulation, and builds alex and happy.
 2. `bootstrap_winarm64` makes the toolchain mirror (A.1) and the bootstrap
    compiler (A.2–A.7, in `ghc-arm64-boot/`) if they are missing, then

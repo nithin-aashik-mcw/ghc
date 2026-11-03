@@ -487,12 +487,12 @@ opsysVariables Amd64 (Darwin {}) = mconcat
 opsysVariables AArch64 (Windows {}) = mconcat
   [ "MSYSTEM" =: "CLANGARM64"
   , "LANG" =: "en_US.UTF-8"
-  , "CABAL_INSTALL_VERSION" =: "3.14.2.0"
+  , "CABAL_INSTALL_VERSION" =: "3.18.2.0"
   , "HADRIAN_ARGS" =: "--docs=none"
     -- The x86_64 GHC (run under emulation) builds the tools, Hadrian and the
     -- aarch64 bootstrap compiler; see Note [Windows AArch64 bootstrap] in
     -- .gitlab/ci.sh. That bootstrap compiler is a development snapshot.
-  , "FETCH_GHC_VERSION" =: "9.10.3"
+  , "FETCH_GHC_VERSION" =: "9.14.1"
   , "CONFIGURE_ARGS" =: "--enable-bootstrap-with-devel-snapshot"
   ]
 opsysVariables _ (Windows {}) = mconcat
