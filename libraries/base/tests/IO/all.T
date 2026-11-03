@@ -115,7 +115,10 @@ test('countReaders001', js_broken(22261), compile_and_run, [''])
 
 test('concio001', [normal, multi_cpu_race],
      makefile_test, ['test.concio001'])
-test('concio001.thr', [extra_files(['concio001.hs']), multi_cpu_race],
+# TODO: replace issue 0 with a real ticket. Seen once on Windows AArch64
+# validate: "child" was missing from stdout. Not reproduced in ~640 runs.
+test('concio001.thr', [extra_files(['concio001.hs']), multi_cpu_race,
+                       when(opsys('mingw32') and arch('aarch64'), fragile(0))],
      makefile_test, ['test.concio001.thr'])
 
 test('T2122', [], compile_and_run, [''])
